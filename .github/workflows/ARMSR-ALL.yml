@@ -95,7 +95,7 @@ jobs:
               echo "Found release: $TAG"
               echo "tag=$TAG" >> $GITHUB_OUTPUT
               gh release download "$TAG" --repo ${{ github.repository }} \
-                --pattern "*rootfs.tar.gz" --dir /tmp/rootfs
+                --pattern "*rootfs*.tar.gz" --dir /tmp/rootfs
               ls -la /tmp/rootfs/
               exit 0
             fi
