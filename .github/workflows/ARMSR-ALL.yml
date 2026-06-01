@@ -109,7 +109,7 @@ jobs:
       - name: Build Docker image
         run: |
           cd /tmp/rootfs
-          gunzip -c *.rootfs.tar.gz > rootfs.tar
+          gunzip -c *rootfs*.tar.gz > rootfs.tar
           cat <<'DOCKERFILE' > Dockerfile
           FROM scratch
           ADD rootfs.tar /
