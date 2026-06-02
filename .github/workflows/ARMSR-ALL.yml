@@ -114,7 +114,7 @@ jobs:
           FROM scratch
           ADD rootfs.tar /
           DOCKERFILE
-          docker build -t ${{ env.GHCR_IMAGE }}:latest .
+          docker build --platform linux/arm64/v8 -t ${{ env.GHCR_IMAGE }}:latest .
           docker tag ${{ env.GHCR_IMAGE }}:latest \
             ${{ env.GHCR_IMAGE }}:${{ steps.release.outputs.tag }}
 
