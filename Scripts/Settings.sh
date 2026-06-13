@@ -36,10 +36,20 @@ sed -i "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g" $CFG_FILE
 sed -i "s/hostname='.*'/hostname='$WRT_NAME'/g" $CFG_FILE
 
 #配置文件修改
-echo "CONFIG_PACKAGE_luci-light=y" >> ./.config
+# 注意：luci / luci-light 等 meta 包在 owrt 分支上会被
+# make defconfig 静默丢弃，只能显式声明所有核心组件
+echo "CONFIG_PACKAGE_luci-base=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-mod-network=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-mod-status=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-mod-system=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-app-firewall=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-proto-ppp=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-proto-ipv6=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-theme-bootstrap=y" >> ./.config
+echo "CONFIG_PACKAGE_rpcd-mod-rrdns=y" >> ./.config
 echo "CONFIG_PACKAGE_uhttpd=y" >> ./.config
 echo "CONFIG_PACKAGE_uhttpd-mod-ubus=y" >> ./.config
-echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> ./.config
 echo "CONFIG_LUCI_LANG_zh_Hans=y" >> ./.config
 echo "CONFIG_PACKAGE_luci-theme-$WRT_THEME=y" >> ./.config
 echo "CONFIG_PACKAGE_luci-app-$WRT_THEME-config=y" >> ./.config
