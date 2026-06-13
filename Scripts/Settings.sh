@@ -9,7 +9,7 @@ sed -i "s/luci-theme-bootstrap/luci-theme-$WRT_THEME/g" $(find ./feeds/luci/coll
 #修改immortalwrt.lan关联IP
 sed -i "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g" $(find ./feeds/luci/modules/luci-mod-system/ -type f -name "flash.js")
 #添加编译日期标识
-sed -i "s/(\(luciversion || ''\))/(\1) + (' \/ $WRT_MARK-$WRT_DATE')/g" $(find ./feeds/luci/modules/luci-mod-status/ -type f -name "10_system.js")
+sed -i "s/(\(luciversion || ''\))/() + (' \/ $WRT_MARK-$WRT_DATE')/g" $(find ./feeds/luci/modules/luci-mod-status/ -type f -name "10_system.js")
 
 WIFI_SH=$(find ./target/linux/{mediatek/filogic,qualcommax}/base-files/etc/uci-defaults/ -type f -name "*set-wireless.sh" 2>/dev/null)
 WIFI_UC="./package/network/config/wifi-scripts/files/lib/wifi/mac80211.uc"
@@ -36,7 +36,10 @@ sed -i "s/192\.168\.[0-9]*\.[0-9]*/$WRT_IP/g" $CFG_FILE
 sed -i "s/hostname='.*'/hostname='$WRT_NAME'/g" $CFG_FILE
 
 #配置文件修改
-echo "CONFIG_PACKAGE_luci=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-light=y" >> ./.config
+echo "CONFIG_PACKAGE_uhttpd=y" >> ./.config
+echo "CONFIG_PACKAGE_uhttpd-mod-ubus=y" >> ./.config
+echo "CONFIG_PACKAGE_luci-mod-admin-full=y" >> ./.config
 echo "CONFIG_LUCI_LANG_zh_Hans=y" >> ./.config
 echo "CONFIG_PACKAGE_luci-theme-$WRT_THEME=y" >> ./.config
 echo "CONFIG_PACKAGE_luci-app-$WRT_THEME-config=y" >> ./.config
@@ -70,7 +73,7 @@ if [[ "${WRT_TARGET^^}" == *"QUALCOMMAX"* ]]; then
 
 	#无WIFI配置调整Q6大小
 	if [[ "${WRT_CONFIG,,}" == *"wifi"* && "${WRT_CONFIG,,}" == *"no"* ]]; then
-		find $DTS_PATH -type f ! -iname '*nowifi*' -exec sed -i 's/ipq\(6018\|8074\).dtsi/ipq\1-nowifi.dtsi/g' {} +
+		find $DTS_PATH -type f ! -iname '*nowifi*' -exec sed -i 's/ipq\(6018\|8074\).dtsi/ipq-nowifi.dtsi/g' {} +
 		echo "qualcommax set up nowifi successfully!"
 	fi
 fi
