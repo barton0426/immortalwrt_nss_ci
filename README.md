@@ -1,12 +1,18 @@
 # 高质量<免费>交流群
 
-点击链接加入群聊【IPQ技术讨论群】：https://qm.qq.com/q/v7nMhzB4oU
-该群为普通交流群。
+[IPQ技术讨论群](https://qm.qq.com/q/v7nMhzB4oU)
 
 # 高质量<付费>中转站
 
-点击链接加入群聊【LiBwrt-Ai学习】：https://qm.qq.com/q/HTa7OiWNCU
-该群为AI中转站群。
+[LiBwrt-Ai](https://api.zipimg.cn/register?aff=LR7FSZ2ZZ4D3)
+
+# 本地编译器
+
+https://github.com/VIKINGYFY/OWRT-Tools.git
+
+# 自用修改版插件
+
+https://github.com/VIKINGYFY/packages.git
 
 # OpenWRT-CI
 
@@ -22,11 +28,7 @@ https://github.com/VIKINGYFY/immortalwrt.git
 
 高通版-沉心：
 
-https://github.com/chenxin527/uboot-ipq60xx-emmc-build.git
-
-https://github.com/chenxin527/uboot-ipq60xx-nand-build.git
-
-https://github.com/chenxin527/uboot-ipq60xx-nor-build.git
+https://github.com/chenxin527/uboot-qsdk12.5-build.git
 
 高通版-小猪：
 
