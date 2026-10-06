@@ -59,3 +59,20 @@ if [ -d "$FEEDS_PATH/packages/lang/rust" ]; then
 		echo "rust fix failed; continuing!"
 	fi
 fi
+
+#兼容稳定版sing-box：移除1.15专有multi_queue字段（1.14会报unknown field拒绝启动）
+HP_GEN="./package/packages/luci-app-homeproxy/root/etc/homeproxy/scripts/generate_client.uc"
+if [ -f "$HP_GEN" ]; then
+	echo " "
+	if sed -i -e 's/^\([ \t]*\)udp_timeout,$/\1udp_timeout/' -e '/^[ \t]*multi_queue$/d' "$HP_GEN"; then
+		echo "homeproxy multi_queue field has been removed!"
+	else
+		echo "homeproxy compat fix failed; continuing!"
+	fi
+fi
+
+#移除viking仓库自带的alpha版sing-box，改用feeds稳定版（上游alpha10有本机IPv6劫持bug）
+if [ -d "./package/packages/sing-box" ]; then
+	rm -rf ./package/packages/sing-box
+	echo "viking alpha sing-box removed, feeds stable version will be used!"
+fi
