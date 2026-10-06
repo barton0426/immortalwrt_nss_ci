@@ -61,11 +61,6 @@ if [ -n "$WRT_PACKAGE" ]; then
 	echo -e "$WRT_PACKAGE" >> ./.config
 fi
 
-#无WIFI配置标志
-if [[ "${WRT_CONFIG,,}" == *"wifi"* && "${WRT_CONFIG,,}" == *"no"* ]]; then
-	echo "WRT_WIFI=wifi-no" >> $GITHUB_ENV
-fi
-
 #ARMSR平台调整 - 移除kmod-thunderx-net（上游package定义已删除，但Device/Packages仍引用）
 if [[ "${WRT_TARGET^^}" == *"ARMSR"* ]]; then
 	sed -i 's/ $(if $(CONFIG_aarch64),kmod-thunderx-net)//' ./target/linux/armsr/image/Makefile
