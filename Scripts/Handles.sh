@@ -55,6 +55,17 @@ if [ -f "$HP_GEN" ]; then
 	fi
 fi
 
+#放行稳定版sing-box：homeproxy 20261008起硬依赖 >=1.15.0_alpha10，实测1.14.2可正常运行(2026-10-08真机A/B)
+HP_MK="./package/packages/luci-app-homeproxy/Makefile"
+if [ -f "$HP_MK" ]; then
+	echo " "
+	if sed -i 's/sing-box (>=1\.15\.0_alpha10)/sing-box (>=1.14.2)/' "$HP_MK"; then
+		echo "homeproxy sing-box dependency relaxed to 1.14.2!"
+	else
+		echo "homeproxy dep fix failed; continuing!"
+	fi
+fi
+
 #移除viking仓库自带的alpha版sing-box，改用feeds稳定版（上游alpha10有本机IPv6劫持bug）
 if [ -d "./package/packages/sing-box" ]; then
 	rm -rf ./package/packages/sing-box
