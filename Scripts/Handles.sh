@@ -43,31 +43,3 @@ FIX "natmapt" "$PACKAGE_PATH/luci-app-natmapt" sed -i "s/network/services/g" \
 #修复Rust编译失败
 FIX "rust" "$FEEDS_PATH/packages/lang/rust" sed -i 's/ci-llvm=true/ci-llvm=false/g' \
 	"$FEEDS_PATH/packages/lang/rust/Makefile"
-
-#兼容稳定版sing-box：移除1.15专有multi_queue字段（1.14会报unknown field拒绝启动）
-HP_GEN="./package/packages/luci-app-homeproxy/root/etc/homeproxy/scripts/generate_client.uc"
-if [ -f "$HP_GEN" ]; then
-	echo " "
-	if sed -i -e 's/^\([ \t]*\)udp_timeout,$/\1udp_timeout/' -e '/^[ \t]*multi_queue$/d' "$HP_GEN"; then
-		echo "homeproxy multi_queue field has been removed!"
-	else
-		echo "homeproxy compat fix failed; continuing!"
-	fi
-fi
-
-#放行稳定版sing-box：homeproxy 20261008起硬依赖 >=1.15.0_alpha10，实测1.14.2可正常运行(2026-10-08真机A/B)
-HP_MK="./package/packages/luci-app-homeproxy/Makefile"
-if [ -f "$HP_MK" ]; then
-	echo " "
-	if sed -i 's/sing-box (>=1\.15\.0_alpha10)/sing-box (>=1.14.2)/' "$HP_MK"; then
-		echo "homeproxy sing-box dependency relaxed to 1.14.2!"
-	else
-		echo "homeproxy dep fix failed; continuing!"
-	fi
-fi
-
-#移除viking仓库自带的alpha版sing-box，改用feeds稳定版（上游alpha10有本机IPv6劫持bug）
-if [ -d "./package/packages/sing-box" ]; then
-	rm -rf ./package/packages/sing-box
-	echo "viking alpha sing-box removed, feeds stable version will be used!"
-fi
