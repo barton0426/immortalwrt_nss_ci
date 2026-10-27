@@ -14,7 +14,8 @@ on:
         required: true
         type: choice
         options:
-          #- AIROHA（无此设备）
+          #- AIROHA-AN7581（无此设备）
+          #- AIROHA-AN7583（无此设备）
           #- IPQ53XX（无此设备）
           - IPQ60XX-WIFI-NO
           - IPQ60XX-WIFI-YES
