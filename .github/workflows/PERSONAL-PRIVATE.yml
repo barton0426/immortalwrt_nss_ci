@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: MIT
+name: Personal firmware (private downloads, manual only)
+
+"on":
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Single target; no flashing or public Docker publishing'
+        required: true
+        type: choice
+        default: x86-64
+        options:
+          - x86-64
+          - armsr-armv8
+          - ipq60xx-zn_m2
+          - ipq807x-redmi_ax6-stock
+      private_commit:
+        description: 'Reviewed private main commit (full 40 characters)'
+        required: true
+        type: string
+        default: d67cf3bfbaf940a9622e87f792006ffdd9e49c82
+      firmware_commit:
+        description: 'Pinned public firmware source commit (not a moving branch)'
+        required: true
+        type: string
+        default: 6dae72b163fdcc042c959463dab2e0c9bbfa587c
+
+permissions:
+  contents: read
+
+concurrency:
+  group: personal-private-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  personal:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'barton0426/immortalwrt_nss_ci' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/WRT-CORE.yml
+    with:
+      WRT_PERSONAL_PRIVATE: true
+      WRT_PERSONAL_TARGET: ${{ inputs.target }}
+      WRT_PRIVATE_COMMIT: ${{ inputs.private_commit }}
+      WRT_FIRMWARE_COMMIT: ${{ inputs.firmware_commit }}
+      WRT_CONFIG: ${{ inputs.target == 'x86-64' && 'X86' || inputs.target == 'armsr-armv8' && 'ARMSR' || inputs.target == 'ipq60xx-zn_m2' && 'IPQ60XX-WIFI-YES' || 'IPQ807X-WIFI-YES' }}
+      WRT_THEME: vantage
+      WRT_NAME: OWRT
+      WRT_SSID: OWRT
+      WRT_WORD: '12345678'
+      WRT_IP: 192.168.10.1
+      WRT_PW: '无'
+      WRT_REPO: https://github.com/VIKINGYFY/immortalwrt.git
+      WRT_BRANCH: owrt
+      WRT_SOURCE: VIKINGYFY/immortalwrt
+      WRT_PACKAGE: ''
+      WRT_TEST: false
+    # Environment-scoped credentials belong to the reusable PRIVATE job only.
+    # Do not inherit the public repository's secrets or install a broad PAT here.

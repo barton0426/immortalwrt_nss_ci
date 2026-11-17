@@ -44,6 +44,22 @@ on:
         required: false
         default: false
         type: boolean
+      WRT_PERSONAL_PRIVATE:
+        required: false
+        default: false
+        type: boolean
+      WRT_PERSONAL_TARGET:
+        required: false
+        default: ''
+        type: string
+      WRT_PRIVATE_COMMIT:
+        required: false
+        default: ''
+        type: string
+      WRT_FIRMWARE_COMMIT:
+        required: false
+        default: ''
+        type: string
 
 env:
   GITHUB_TOKEN: ${{secrets.GITHUB_TOKEN}}
@@ -62,6 +78,7 @@ env:
 
 jobs:
   core:
+    if: ${{ !inputs.WRT_PERSONAL_PRIVATE }}
     name: ${{inputs.WRT_SOURCE}}
     runs-on: ubuntu-latest
     outputs:
@@ -308,6 +325,104 @@ jobs:
 
             内核版本：${{env.WRT_KVER}}
             插件列表：${{env.WRT_LIST}}
+
+  personal-private:
+    name: Personal firmware / private outputs only
+    if: >-
+      inputs.WRT_PERSONAL_PRIVATE && github.event_name == 'workflow_dispatch' &&
+      github.repository == 'barton0426/immortalwrt_nss_ci' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    environment: personal-private
+    env:
+      GITHUB_TOKEN: ''
+      GH_TOKEN: ''
+      PERSONAL_TARGET: ${{ inputs.WRT_PERSONAL_TARGET }}
+      PRIVATE_COMMIT: ${{ inputs.WRT_PRIVATE_COMMIT }}
+      FIRMWARE_COMMIT: ${{ inputs.WRT_FIRMWARE_COMMIT }}
+      PERSONAL_PRIVATE_REPOSITORY: ${{ vars.PERSONAL_PRIVATE_REPOSITORY }}
+      PERSONAL_PRIVATE_REPOSITORY_ID: ${{ vars.PERSONAL_PRIVATE_REPOSITORY_ID }}
+    steps:
+      - name: Checkout public build instructions without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Set up pinned CLI Go without shared caches
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10'
+          check-latest: false
+          cache: false
+      - name: Prepare an isolated hosted build directory
+        shell: bash
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$PRIVATE_COMMIT" =~ ^[0-9a-f]{40}$ && "$FIRMWARE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          case "$PERSONAL_TARGET" in
+            x86-64|armsr-armv8|ipq60xx-zn_m2|ipq807x-redmi_ax6-stock) ;;
+            *) exit 1 ;;
+          esac
+          sudo apt-get -yqq update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential bzip2 ca-certificates ccache clang cmake cpio curl \
+            device-tree-compiler dos2unix file flex g++-multilib gawk gcc-multilib \
+            genisoimage gettext git jq libbpf-dev libclang-dev libdw-dev libelf-dev \
+            libncurses-dev libssl-dev lld llvm ninja-build patch perl pkgconf \
+            python3 python3-cryptography python3-dev python3-packaging python3-pyelftools \
+            python3-setuptools qemu-utils rsync swig unzip wget xz-utils zlib1g-dev zstd
+          sudo mkdir /mnt/personal_build_wrt
+          sudo chown "$USER:$USER" /mnt/personal_build_wrt
+          mkdir "${RUNNER_TEMP:?}/personal-private-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+      - name: Fetch only the reviewed paired private source
+        shell: bash
+        env:
+          PERSONAL_PRIVATE_TOKEN: ${{ secrets.PERSONAL_PRIVATE_CONTENTS }}
+        run: |
+          set -euo pipefail
+          python3 -I -B .github/scripts/personal-private.py fetch \
+            --state "${RUNNER_TEMP:?}/personal-private-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" \
+            --commit "$PRIVATE_COMMIT"
+      - name: Build the CLI and firmware without credentials or public logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -I -B .github/scripts/personal-private-build.py \
+            --state "${RUNNER_TEMP:?}/personal-private-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" \
+            --checkout "${GITHUB_WORKSPACE:?}" --buildroot /mnt/personal_build_wrt \
+            --target "$PERSONAL_TARGET" --firmware-commit "$FIRMWARE_COMMIT"
+      - name: Prepare private diagnostics if a non-cancelled build stopped
+        id: private_output
+        if: ${{ always() && !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          STATE="${RUNNER_TEMP:?}/personal-private-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+          if [[ -f "$STATE/FETCH.json" ]]; then
+            python3 -I -B .github/scripts/personal-private-build.py --diagnostics \
+              --state "$STATE" --checkout "${GITHUB_WORKSPACE:?}" --buildroot /mnt/personal_build_wrt \
+              --target "$PERSONAL_TARGET" --firmware-commit "$FIRMWARE_COMMIT"
+            echo 'ready=true' >> "${GITHUB_OUTPUT:?}"
+          fi
+      - name: Upload products OR diagnostics ONLY to the checked private repository
+        if: ${{ always() && !cancelled() && steps.private_output.outputs.ready == 'true' }}
+        shell: bash
+        env:
+          PERSONAL_PRIVATE_TOKEN: ${{ secrets.PERSONAL_PRIVATE_CONTENTS }}
+        run: |
+          set -euo pipefail
+          python3 -I -B .github/scripts/personal-private.py publish \
+            --state "${RUNNER_TEMP:?}/personal-private-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}" \
+            --tag "personal-${PERSONAL_TARGET}-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:?}"
+      # No upload-artifact, cache restore/save, public release, GHCR, report
+      # collector, or verbose failure fallback may be added to this job.
 
   cache-rollover:
     name: Roll cache generations
