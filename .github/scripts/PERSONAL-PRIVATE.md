@@ -6,11 +6,11 @@ This is an **owner-only, manual, main-branch** entry in the existing public firm
 
 1. Create/configure the `personal-private` environment in the public repository. Restrict deployment to `main`; configure the owner as the required reviewer if the account supports that protection.
 2. Add environment variables `PERSONAL_PRIVATE_REPOSITORY` (`owner/private-repository`) and `PERSONAL_PRIVATE_REPOSITORY_ID` (its immutable numeric GitHub ID).
-3. Create a **dedicated fine-grained PAT**, selecting **only that private repository**, with **Contents: read and write**. Store it as environment secret `PERSONAL_PRIVATE_CONTENTS`. Do not use a broad host PAT or repository-wide inherited secrets. Classic `ghp_` credentials are rejected by this CI transport.
+3. Prefer a **dedicated fine-grained PAT**, selecting **only that private repository**, with **Contents: read and write**. Store it as environment secret `PERSONAL_PRIVATE_CONTENTS`; never use repository-wide inherited secrets. A classic `ghp_` PAT is rejected by default. The owner may explicitly accept its broader permissions and set environment variable `PERSONAL_PRIVATE_ALLOW_CLASSIC` to exactly `true`: that exception is restricted to `barton0426/immortalwrt_nss_ci` (ID `979201312`), both owner actors, manual/main, and `barton0426/sing-box-private` (ID `1457920845`). It does **not** narrow the token's actual GitHub permissions or protect it from hosted/repository administrators.
 4. Confirm the private repository is private, non-Fork, has default branch `main`, and that its current main HEAD equals the full 40-character private-source pin in the manual form. Review a changed source pin before using it. Set a reviewed full firmware-source commit as well.
 5. Check the actual account's Actions/billing limits. Hosted-runner use is not a promise of zero cost. No new schedule, budget or retention policy is configured by this entry.
 
-Without the dedicated secret, the entry stops; there is no public download fallback. This document is configuration guidance, **not evidence that these settings have already been installed**.
+The personal caller explicitly forwards only `PERSONAL_PRIVATE_CONTENTS`, and the reusable workflow declares it optional so ordinary callers are unaffected. GitHub requires this named mapping even for an environment-only secret; declaring `environment` alone is insufficient. The private job checks only a nonempty boolean before dependency preparation (no token in that step), then gives the actual token solely to fetch/publish. Without the mapped secret, it stops with no public download fallback. This document is configuration guidance, **not evidence of installed values or runtime credential delivery**.
 
 ## Start one target, manually
 

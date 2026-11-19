@@ -6,6 +6,9 @@ name: WRT-CORE
 
 on:
   workflow_call:
+    secrets:
+      PERSONAL_PRIVATE_CONTENTS:
+        required: false # Ordinary public callers must not need this credential.
     inputs:
       WRT_CONFIG:
         required: true
@@ -346,6 +349,7 @@ jobs:
       FIRMWARE_COMMIT: ${{ inputs.WRT_FIRMWARE_COMMIT }}
       PERSONAL_PRIVATE_REPOSITORY: ${{ vars.PERSONAL_PRIVATE_REPOSITORY }}
       PERSONAL_PRIVATE_REPOSITORY_ID: ${{ vars.PERSONAL_PRIVATE_REPOSITORY_ID }}
+      PERSONAL_PRIVATE_ALLOW_CLASSIC: ${{ vars.PERSONAL_PRIVATE_ALLOW_CLASSIC }}
     steps:
       - name: Checkout public build instructions without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -358,6 +362,16 @@ jobs:
           go-version: '1.26.10'
           check-latest: false
           cache: false
+      - name: Require the mapped private credential before dependency preparation
+        shell: bash
+        env:
+          PERSONAL_PRIVATE_SECRET_PRESENT: ${{ secrets.PERSONAL_PRIVATE_CONTENTS != '' }}
+        run: |
+          set -euo pipefail
+          if [[ "$PERSONAL_PRIVATE_SECRET_PRESENT" != true ]]; then
+            echo 'Private environment credential is unavailable; dependency preparation stopped.' >&2
+            exit 1
+          fi
       - name: Prepare an isolated hosted build directory
         shell: bash
         env:

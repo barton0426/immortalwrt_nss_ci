@@ -30,6 +30,17 @@ def load(name, path):
 p = load('personal_private_test_module', HERE / 'personal-private.py')
 b = load('personal_private_build_test_module', HERE / 'personal-private-build.py')
 TOKEN = 'github_pat_' + 'Z' * 40  # synthetic only
+CLASSIC = 'ghp_' + 'Z' * 40  # synthetic only; never a real credential loader
+OWNER_CONTEXT = {
+    'PERSONAL_PRIVATE_ALLOW_CLASSIC': 'true',
+    'GITHUB_REPOSITORY': 'barton0426/immortalwrt_nss_ci',
+    'GITHUB_REPOSITORY_ID': '979201312',
+    'GITHUB_REPOSITORY_OWNER': 'barton0426',
+    'GITHUB_ACTOR': 'barton0426',
+    'GITHUB_TRIGGERING_ACTOR': 'barton0426',
+    'GITHUB_EVENT_NAME': 'workflow_dispatch',
+    'GITHUB_REF': 'refs/heads/main',
+}
 COMMIT = 'a' * 40
 TREE = 'b' * 40
 
@@ -46,6 +57,54 @@ class TransportTests(unittest.TestCase):
         for token in ('', 'ghp_' + 'Z' * 40, 'github_pat_bad\n', 'github_pat_short'):
             with self.subTest(token_kind=len(token)), self.assertRaises(p.Rejected):
                 p.GitHub('tester/private', 1, token)
+
+    def test_classic_owner_exception_accepts_only_explicit_context(self):
+        with patch.dict(os.environ, OWNER_CONTEXT, clear=True):
+            gh = p.GitHub('barton0426/sing-box-private', 1457920845, CLASSIC)
+            self.assertEqual(gh.repository_id, 1457920845)
+        with patch.dict(os.environ, {}, clear=True), self.assertRaises(p.Rejected):
+            p.GitHub('barton0426/sing-box-private', 1457920845, CLASSIC)
+
+    def test_classic_rejects_each_wrong_or_missing_context_before_network(self):
+        for key in OWNER_CONTEXT:
+            for missing in (True, False):
+                context = dict(OWNER_CONTEXT)
+                if missing:
+                    del context[key]
+                else:
+                    context[key] = 'wrong'
+                with self.subTest(key=key, missing=missing), patch.dict(os.environ, context, clear=True), \
+                        patch.object(p.http.client, 'HTTPSConnection') as network, \
+                        patch.object(p, 'run_git') as git, self.assertRaises(p.Rejected):
+                    p.GitHub('barton0426/sing-box-private', 1457920845, CLASSIC)
+                network.assert_not_called()
+                git.assert_not_called()
+        for value in ('TRUE', '1', 'yes', 'false', ''):
+            with self.subTest(flag=value), patch.dict(os.environ, dict(OWNER_CONTEXT, PERSONAL_PRIVATE_ALLOW_CLASSIC=value), clear=True), self.assertRaises(p.Rejected):
+                p.GitHub('barton0426/sing-box-private', 1457920845, CLASSIC)
+
+    def test_classic_exception_binds_private_name_and_immutable_id(self):
+        for name, identity in (('tester/private', 1457920845), ('barton0426/other', 1457920845),
+                               ('barton0426/sing-box-private', 1), ('barton0426/sing-box-private', True)):
+            with self.subTest(name=name, identity=identity), patch.dict(os.environ, OWNER_CONTEXT, clear=True), self.assertRaises(p.Rejected):
+                p.GitHub(name, identity, CLASSIC)
+
+    def test_malformed_classic_still_rejected_when_opted_in(self):
+        for token in ('', 'ghp_short', CLASSIC + '\n', CLASSIC + '_', 'Bearer ' + CLASSIC):
+            with self.subTest(length=len(token)), patch.dict(os.environ, OWNER_CONTEXT, clear=True), self.assertRaises(p.Rejected):
+                p.GitHub('barton0426/sing-box-private', 1457920845, token)
+
+    def test_fine_grained_default_unchanged_by_classic_flag(self):
+        for flag in ('', 'true', 'false', 'wrong'):
+            with patch.dict(os.environ, {'PERSONAL_PRIVATE_ALLOW_CLASSIC': flag}, clear=True):
+                self.assertEqual(p.GitHub('tester/private', 1, TOKEN).repository_id, 1)
+
+    def test_classic_token_and_opt_in_never_reach_git_environment(self):
+        with patch.dict(os.environ, dict(OWNER_CONTEXT, PERSONAL_PRIVATE_TOKEN=CLASSIC), clear=True):
+            env = p.git_env()
+        self.assertNotIn(CLASSIC, env.values())
+        self.assertNotIn('PERSONAL_PRIVATE_TOKEN', env)
+        self.assertNotIn('PERSONAL_PRIVATE_ALLOW_CLASSIC', env)
 
     def test_repository_shape(self):
         for name in ('../private', 'https://github.com/tester/private', 'tester/private.git',
@@ -455,11 +514,24 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(set(self.caller['jobs']), {'personal'})
         job = self.caller['jobs']['personal']
         self.assertTrue(job['with']['WRT_PERSONAL_PRIVATE'])
-        self.assertNotIn('secrets', job)
+        self.assertEqual(job['secrets'], {'PERSONAL_PRIVATE_CONTENTS': '${{ secrets.PERSONAL_PRIVATE_CONTENTS }}'})
         for condition in (job['if'], self.current['jobs']['personal-private']['if']):
             for fragment in ("github.event_name == 'workflow_dispatch'", "github.actor == github.repository_owner",
                              "github.ref == 'refs/heads/main'", "github.repository == 'barton0426/immortalwrt_nss_ci'"):
                 self.assertIn(fragment, condition)
+
+    def test_private_secret_interface_is_optional_and_preflight_never_gets_token(self):
+        call = self.current.get('on', self.current.get(True))['workflow_call']
+        self.assertEqual(call['secrets'], {'PERSONAL_PRIVATE_CONTENTS': {'required': False}})
+        job = self.current['jobs']['personal-private']
+        self.assertEqual(job['env']['PERSONAL_PRIVATE_ALLOW_CLASSIC'], '${{ vars.PERSONAL_PRIVATE_ALLOW_CLASSIC }}')
+        checks = [step for step in job['steps'] if 'PERSONAL_PRIVATE_SECRET_PRESENT' in step.get('env', {})]
+        self.assertEqual(len(checks), 1)
+        self.assertEqual(checks[0]['env'], {'PERSONAL_PRIVATE_SECRET_PRESENT': "${{ secrets.PERSONAL_PRIVATE_CONTENTS != '' }}"})
+        self.assertIn('exit 1', checks[0]['run'])
+        self.assertNotIn('secrets.', checks[0]['run'])
+        dependencies = next(step for step in job['steps'] if step['name'] == 'Prepare an isolated hosted build directory')
+        self.assertLess(job['steps'].index(checks[0]), job['steps'].index(dependencies))
 
     def test_private_job_has_no_public_artifact_cache_or_release_action(self):
         job = self.current['jobs']['personal-private']

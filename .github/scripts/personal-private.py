@@ -141,11 +141,30 @@ def auth_config(repository, token):
         raise
 
 
+def owner_classic_opt_in(repository, repository_id):
+    # Explicit owner exception, not a reduction of the PAT's actual permissions.
+    # Other repositories, actors, events and refs retain the fine-grained default.
+    context = {
+        'PERSONAL_PRIVATE_ALLOW_CLASSIC': 'true',
+        'GITHUB_REPOSITORY': 'barton0426/immortalwrt_nss_ci',
+        'GITHUB_REPOSITORY_ID': '979201312',
+        'GITHUB_REPOSITORY_OWNER': 'barton0426',
+        'GITHUB_ACTOR': 'barton0426',
+        'GITHUB_TRIGGERING_ACTOR': 'barton0426',
+        'GITHUB_EVENT_NAME': 'workflow_dispatch',
+        'GITHUB_REF': 'refs/heads/main',
+    }
+    return (repository == 'barton0426/sing-box-private' and repository_id == 1457920845
+            and all(os.environ.get(key) == value for key, value in context.items()))
+
+
 class GitHub:
     def __init__(self, repository, repository_id, token):
         need(REPOSITORY.fullmatch(repository) and not repository.endswith('.git'), 'repository-invalid')
         need(type(repository_id) is int and repository_id > 0, 'repository-id-invalid')
-        need(isinstance(token, str) and re.fullmatch(r'github_pat_[A-Za-z0-9_]{30,}', token),
+        fine_grained = isinstance(token, str) and re.fullmatch(r'github_pat_[A-Za-z0-9_]{30,}', token)
+        classic = isinstance(token, str) and re.fullmatch(r'ghp_[A-Za-z0-9]{30,}', token)
+        need(fine_grained or (classic and owner_classic_opt_in(repository, repository_id)),
              'dedicated-fine-grained-token-required')
         self.repository, self.repository_id, self.token = repository, repository_id, token
         self.prefix = '/repos/' + repository
