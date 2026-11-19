@@ -319,6 +319,100 @@ class TransportTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def test_build_child_umask_preserves_parent_and_private_log(self):
+        # Real credential-free child: OpenWrt needs 022, while our parent and
+        # active log must remain private even under a permissive caller umask.
+        probe = """import json, os
+from pathlib import Path
+mask = os.umask(0)
+os.umask(mask)
+Path('ordinary-output').write_bytes(b'synthetic')
+Path('ordinary-directory').mkdir()
+print(json.dumps({'umask': mask, 'log_mode': os.fstat(1).st_mode & 0o777,
+                  'file_mode': Path('ordinary-output').stat().st_mode & 0o777,
+                  'directory_mode': Path('ordinary-directory').stat().st_mode & 0o777,
+                  'private_token_present': bool(os.environ.get('PERSONAL_PRIVATE_TOKEN')),
+                  'github_token_present': bool(os.environ.get('GITHUB_TOKEN'))}))
+"""
+        for mask in (0o077, 0o027, 0o000):
+            with self.subTest(parent_umask=mask), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp).resolve()
+                state, root = base / 'state', base / 'firmware'
+                state.mkdir(mode=0o700)
+                root.mkdir(mode=0o700)
+                with patch.dict(os.environ, {'PERSONAL_PRIVATE_TOKEN': TOKEN,
+                                             'GITHUB_TOKEN': TOKEN}, clear=False):
+                    build = b.Build(state, ROOT, root, 'x86-64')
+                old = os.umask(mask)
+                try:
+                    self.assertEqual(build.run('umask-probe', [sys.executable, '-I', '-B', '-c', probe]), 0)
+                    current = os.umask(mask)
+                    self.assertEqual(current, mask)
+                    log = state / 'logs/01-umask-probe.log'
+                    self.assertEqual(json.loads(log.read_text()), {
+                        'umask': 0o022, 'log_mode': 0o600, 'file_mode': 0o644,
+                        'directory_mode': 0o755, 'private_token_present': False,
+                        'github_token_present': False})
+                    self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+                    for directory in (state, root, state / 'home', state / 'tmp',
+                                      state / 'logs', state / 'workspace'):
+                        self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+                finally:
+                    os.umask(old)
+
+    def test_failed_build_child_keeps_private_log_and_exit_semantics(self):
+        probe = """import os, sys
+mask = os.umask(0)
+os.umask(mask)
+assert mask == 0o022
+assert os.fstat(1).st_mode & 0o777 == 0o600
+print('synthetic private stdout')
+print('synthetic private stderr', file=sys.stderr)
+sys.exit(7)
+"""
+        for allowed in (False, True):
+            with self.subTest(allow_failure=allowed), tempfile.TemporaryDirectory() as temp:
+                base = Path(temp).resolve()
+                state, root = base / 'state', base / 'firmware'
+                state.mkdir(mode=0o700)
+                root.mkdir(mode=0o700)
+                build = b.Build(state, ROOT, root, 'x86-64')
+                old = os.umask(0o077)
+                try:
+                    with patch('sys.stdout', new_callable=io.StringIO) as stdout, \
+                            patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                        if allowed:
+                            self.assertEqual(build.run('failed-probe', [sys.executable, '-I', '-B', '-c', probe],
+                                                       allow_failure=True), 7)
+                        else:
+                            with self.assertRaises(b.transport.Rejected) as rejected:
+                                build.run('failed-probe', [sys.executable, '-I', '-B', '-c', probe])
+                            self.assertEqual(str(rejected.exception), 'build-command-failed-output-withheld')
+                        self.assertEqual(stdout.getvalue(), '')
+                        self.assertEqual(stderr.getvalue(), '')
+                    log = state / 'logs/01-failed-probe.log'
+                    self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+                    self.assertIn('synthetic private stdout', log.read_text())
+                    self.assertIn('synthetic private stderr', log.read_text())
+                    self.assertEqual(os.umask(0o077), 0o077)
+                finally:
+                    os.umask(old)
+
+    def test_build_log_exclusive_creation_rejects_links_before_child(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp).resolve()
+            state, root = base / 'state', base / 'firmware'
+            state.mkdir(mode=0o700)
+            root.mkdir(mode=0o700)
+            build = b.Build(state, ROOT, root, 'x86-64')
+            outside = base / 'outside'
+            outside.write_bytes(b'unchanged')
+            (state / 'logs/01-link-probe.log').symlink_to(outside)
+            with patch.object(b.subprocess, 'Popen') as child, self.assertRaises(FileExistsError):
+                build.run('link-probe', [sys.executable, '-I', '-B', '-c', 'raise SystemExit(0)'])
+            child.assert_not_called()
+            self.assertEqual(outside.read_bytes(), b'unchanged')
+
     def test_target_selection_is_single_and_preserves_non_target_settings(self):
         content = '\n'.join(['CONFIG_TARGET_ALL_PROFILES=y',
             'CONFIG_TARGET_qualcommax=y', 'CONFIG_TARGET_qualcommax_ipq60xx=y',

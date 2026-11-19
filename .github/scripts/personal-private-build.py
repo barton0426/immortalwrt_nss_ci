@@ -164,10 +164,14 @@ class Build:
         need(re.fullmatch(r'[a-z0-9-]+', label), 'log-label-invalid')
         self.sequence += 1
         path = self.state / 'logs' / ('%02d-' % self.sequence + label + '.log')
-        with path.open('xb') as log:
+        # Keep the log private from creation, independently of the caller's
+        # umask. Only credential-free build children use OpenWrt's required 022;
+        # the parent's 077 and the private directory boundaries are unchanged.
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, 'wb') as log:
             process = subprocess.Popen(args, cwd=cwd or self.root, env=self.env,
                                        stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
-                                       start_new_session=True)
+                                       start_new_session=True, umask=0o022)
             try:
                 result = process.wait(timeout=5 * 60 * 60)
             except BaseException:
