@@ -248,6 +248,80 @@ class Build:
                                           'box-private', 'luci-app-homeproxy', 'luci-app-homeproxy-private'])
         need(not old.exists(), 'ordinary-homeproxy-still-discoverable')
 
+    def configuration_report(self, revision):
+        # Preserve actual SDK inputs before the CLI, even when validation fails.
+        # This imports reviewed public data-only code, never private source.
+        spec = importlib.util.spec_from_file_location('personal_config_reader', HERE / 'private-prebuilt.py')
+        reader = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = reader
+        spec.loader.exec_module(reader)
+        reader.directory(self.state / 'workspace')
+        reports = self.state / 'workspace/build-reports'
+        reports.mkdir(mode=0o700, exist_ok=True)
+        reader.directory(reports)
+        output = reports / 'configuration'
+        output.mkdir(mode=0o700)
+        reader.directory(output)
+        _, arch, target, subtarget, package_arch, device = TARGETS[self.choice]
+        base = 'target/linux/' + target
+        sources = {
+            'effective.config': ('.config', reader.MAX_CONFIG),
+            'target-board.Makefile': (base + '/Makefile', reader.MAX_MK),
+            'target-subtarget.mk': (base + '/' + subtarget + '/target.mk', reader.MAX_MK),
+            'target-kconfig.in': ('tmp/.config-target.in', reader.MAX_KCONFIG),
+            'package-kconfig.in': ('tmp/.config-package.in', 32 * 1024 * 1024),
+        }
+        data, inventory = {}, {}
+        for name, (origin, limit) in sources.items():
+            try:
+                content = reader.read_regular(self.root, origin, limit)
+            except reader.Rejected:
+                raise transport.Rejected('configuration-snapshot-input-rejected') from None
+            data[name] = content
+            fd = os.open(output / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(content)
+            inventory[name] = {'buildroot_path': origin, 'sha256': reader.digest(content), 'size': len(content)}
+        config = data['effective.config'].decode('utf-8').split('\n')
+        metadata = data['package-kconfig.in'].decode('utf-8')
+        owners = {}
+        for name in ('qt5base-gui', 'fwknopd', 'luci-app-fwknopd',
+                     'squeezelite-custom', 'mihomo-alpha', 'mihomo-meta'):
+            symbol = 'PACKAGE_' + name
+            header = r'^[ \t]*(?:config|menuconfig)[ \t]+' + re.escape(symbol) + r'[ \t]*(?:#[^\n]*)?'
+            declarations = re.findall(r'(?m)' + header + r'$', metadata)
+            typed = re.findall(r'(?m)' + header + r'\n[ \t]*(?:bool|tristate)(?=[ \t\n]|$)', metadata)
+            values = [line[len('CONFIG_' + symbol + '='):] for line in config
+                      if line.startswith('CONFIG_' + symbol + '=')]
+            values += ['n' for line in config if line == '# CONFIG_' + symbol + ' is not set']
+            value = values[0] if len(values) == 1 and values[0] in ('y', 'm', 'n') else \
+                'absent' if not values else 'invalid-or-duplicate'
+            owners[name] = {'serialized_value': value, 'declaration_found': len(declarations) == len(typed) == 1,
+                            'declaration_count': len(declarations), 'boolean_declaration_count': len(typed)}
+        inactive = all(item['declaration_found'] and item['serialized_value'] in ('n', 'absent')
+                       for item in owners.values())
+        settings = {'config_sha256': reader.digest(data['effective.config']), 'goarch': arch,
+                    'target': target, 'subtarget': subtarget, 'package_architecture': package_arch, 'device': device}
+        report = {'schema_version': 1, 'stage': 'post-clean-defconfig-before-private-cli',
+                  'firmware_commit': revision, 'target_key': self.choice, 'files': inventory,
+                  'known_cycle_owner_packages': owners, 'known_cycle_owners_unselected': inactive,
+                  'router_runtime_tested': False, 'firmware_complete': False}
+        try:
+            hashes = reader.check_target_files(self.root, settings)
+            need(hashes == {item['buildroot_path']: item['sha256'] for name, item in inventory.items()
+                            if name in ('target-board.Makefile', 'target-subtarget.mk', 'target-kconfig.in')},
+                 'configuration-snapshot-changed')
+            need(all('CONFIG_PACKAGE_' + name + '=y' in config for name in
+                     ('box-private', 'luci-app-homeproxy', 'luci-app-homeproxy-private', 'sing-box')),
+                 'paired-packages-not-selected')
+            report['target_config_preflight'] = 'passed'
+        except (reader.Rejected, transport.Rejected) as error:
+            report.update(target_config_preflight='rejected', reason=str(error))
+            write_json(output / 'CONFIG-SNAPSHOT.json', report)
+            raise transport.Rejected('effective-configuration-rejected') from None
+        write_json(output / 'CONFIG-SNAPSHOT.json', report)
+        need(inactive, 'known-kconfig-cycle-owner-requires-project-repair')
+
     def cli(self, fetched, revision):
         config, arch, target, subtarget, package_arch, device = TARGETS[self.choice]
         self.env['OUT_DIR'] = str(self.state / 'cli')
@@ -352,6 +426,7 @@ class Build:
         self.run('initial-build-clean', ['make', '-j2', 'clean'])
         # Regenerate authoritative target Kconfig if clean removed tmp metadata.
         self.run('post-clean-defconfig', ['make', '-j2', 'defconfig'])
+        self.configuration_report(revision)
         source = self.cli(fetched, revision)
         self.script('ordinary-rust', '.github/scripts/prepare-rust.sh')
         jobs = '-j' + str(max(1, os.cpu_count() or 1))

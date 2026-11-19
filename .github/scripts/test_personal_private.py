@@ -319,6 +319,117 @@ class TransportTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def configuration_fixture(self):
+        # Reuse pure synthetic records, NEVER a real SDK, CLI execution or firmware.
+        fixtures = load('personal_config_snapshot_fixtures', HERE / 'test_private_prebuilt.py')
+        fixture = fixtures.ReaderTests()
+        fixture.setUp()
+        state = fixture.root / 'state'
+        state.mkdir(mode=0o700)
+        build = b.Build(state, ROOT, fixture.buildroot, 'x86-64')
+        required = ''.join('CONFIG_PACKAGE_' + name + '=y\n' for name in
+                           ('box-private', 'luci-app-homeproxy', 'luci-app-homeproxy-private', 'sing-box'))
+        fixture.config += (required + '# CONFIG_PACKAGE_fwknopd is not set\n' +
+                           'CONFIG_PACKAGE_fixture1.0=m\nCONFIG_SYNTHETIC_EMPTY=\n' +
+                           'CONFIG_SYNTHETIC_HEX=0XAbCd\n').encode()
+        (fixture.buildroot / '.config').write_bytes(fixture.config)
+        owners = ('qt5base-gui', 'fwknopd', 'luci-app-fwknopd',
+                  'squeezelite-custom', 'mihomo-alpha', 'mihomo-meta')
+        fixture.package_kconfig = fixture.buildroot / 'tmp/.config-package.in'
+        fixture.package_kconfig.write_text('# SYNTHETIC package metadata, not SDK output\n' +
+            ''.join('config PACKAGE_' + name + '\n\ttristate "Synthetic owner"\n\n' for name in owners))
+        output = state / 'workspace/build-reports/configuration'
+        return build, fixture, output
+
+    def test_configuration_snapshot_is_private_and_binds_synthetic_actual_inputs(self):
+        build, fixture, output = self.configuration_fixture()
+        saved = os.umask(0)
+        try:
+            build.configuration_report('e' * 40)
+            self.assertEqual(os.umask(0), 0)
+        finally:
+            os.umask(saved)
+        report = json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())
+        self.assertEqual(report['target_config_preflight'], 'passed')
+        self.assertTrue(report['known_cycle_owners_unselected'])
+        self.assertEqual(report['known_cycle_owner_packages']['fwknopd']['serialized_value'], 'n')
+        self.assertEqual(report['known_cycle_owner_packages']['mihomo-meta']['serialized_value'], 'absent')
+        self.assertFalse(report['firmware_complete'])
+        self.assertFalse(report['router_runtime_tested'])
+        self.assertEqual(output.stat().st_mode & 0o777, 0o700)
+        self.assertEqual((output / 'effective.config').read_bytes(), fixture.config)
+        for name, metadata in report['files'].items():
+            path = output / name
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_nlink, 1)
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), metadata['sha256'])
+        self.assertEqual((output / 'CONFIG-SNAPSHOT.json').stat().st_mode & 0o777, 0o600)
+        self.assertFalse((build.state / 'PUBLISH.json').exists())
+
+    def test_configuration_syntax_failure_preserves_raw_private_snapshot(self):
+        build, fixture, output = self.configuration_fixture()
+        raw = fixture.config + b'CONFIG_BAD=$(whoami)\n'
+        (fixture.buildroot / '.config').write_bytes(raw)
+        with self.assertRaisesRegex(b.transport.Rejected, 'effective-configuration-rejected'):
+            build.configuration_report('e' * 40)
+        self.assertEqual((output / 'effective.config').read_bytes(), raw)
+        self.assertEqual(json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())['reason'], 'config-syntax')
+
+    def test_cycle_owner_selected_or_missing_metadata_is_not_silently_accepted(self):
+        for value in ('y', 'm', 'missing-declaration', 'conflicting-declaration-type',
+                      'invalid-type-token-dot', 'invalid-type-token-slash',
+                      'duplicate-tab-header', 'duplicate-spaces-header', 'duplicate-comment-header'):
+            with self.subTest(value=value):
+                build, fixture, output = self.configuration_fixture()
+                if value == 'missing-declaration':
+                    fixture.package_kconfig.write_text('config OTHER\n\ttristate "Not an owner"\n')
+                elif value == 'conflicting-declaration-type':
+                    fixture.package_kconfig.write_text(fixture.package_kconfig.read_text() +
+                        'config PACKAGE_mihomo-meta\n\tstring "Conflicting synthetic type"\n')
+                elif value.startswith('invalid-type-token-'):
+                    token = 'tristate.bad' if value.endswith('dot') else 'bool/invalid'
+                    fixture.package_kconfig.write_text(fixture.package_kconfig.read_text().replace(
+                        'PACKAGE_mihomo-meta\n\ttristate', 'PACKAGE_mihomo-meta\n\t' + token))
+                elif value.startswith('duplicate-'):
+                    header = {'duplicate-tab-header': 'config\tPACKAGE_mihomo-meta',
+                              'duplicate-spaces-header': 'config  PACKAGE_mihomo-meta',
+                              'duplicate-comment-header': 'config PACKAGE_mihomo-meta # duplicate'}[value]
+                    fixture.package_kconfig.write_text(fixture.package_kconfig.read_text() +
+                        header + '\n\ttristate "Conflicting synthetic declaration"\n')
+                else:
+                    (fixture.buildroot / '.config').write_bytes(fixture.config +
+                        ('CONFIG_PACKAGE_mihomo-meta=' + value + '\n').encode())
+                with self.assertRaisesRegex(b.transport.Rejected, 'known-kconfig-cycle-owner'):
+                    build.configuration_report('e' * 40)
+                report = json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())
+                self.assertFalse(report['known_cycle_owners_unselected'])
+                self.assertEqual(report['target_config_preflight'], 'passed')
+                self.assertFalse((build.state / 'PUBLISH.json').exists())
+
+    def test_configuration_snapshot_requires_all_four_paired_packages(self):
+        build, fixture, output = self.configuration_fixture()
+        (fixture.buildroot / '.config').write_bytes(fixture.config.replace(
+            b'CONFIG_PACKAGE_luci-app-homeproxy=y\n', b''))
+        with self.assertRaisesRegex(b.transport.Rejected, 'effective-configuration-rejected'):
+            build.configuration_report('e' * 40)
+        self.assertEqual(json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())['reason'],
+                         'paired-packages-not-selected')
+
+    def test_configuration_snapshot_never_overwrites_prior_evidence(self):
+        build, fixture, output = self.configuration_fixture()
+        build.configuration_report('e' * 40)
+        original = (output / 'CONFIG-SNAPSHOT.json').read_bytes()
+        with self.assertRaises(FileExistsError):
+            build.configuration_report('e' * 40)
+        self.assertEqual((output / 'CONFIG-SNAPSHOT.json').read_bytes(), original)
+
+    def test_configuration_snapshot_rejects_source_hardlinks(self):
+        build, fixture, output = self.configuration_fixture()
+        os.link(fixture.package_kconfig, fixture.root / 'extra-hardlink')
+        with self.assertRaisesRegex(b.transport.Rejected, 'configuration-snapshot-input-rejected'):
+            build.configuration_report('e' * 40)
+        self.assertFalse((output / 'package-kconfig.in').exists())
+
     def test_build_child_umask_preserves_parent_and_private_log(self):
         # Real credential-free child: OpenWrt needs 022, while our parent and
         # active log must remain private even under a permissive caller umask.

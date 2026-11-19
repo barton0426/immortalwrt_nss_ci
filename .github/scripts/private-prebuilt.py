@@ -51,6 +51,9 @@ MAX_RAW = MAX_TOTAL + MAX_MEMBERS * 1024 + 10240
 MAX_JSON = 4 * 1024 * 1024
 MAX_INPUT = 65536
 MAX_CONFIG = 2 * 1024 * 1024
+# Fixed OpenWrt scripts/config/lexer.l accepts literal word characters plus ./,
+# not +. Share the grammar for assignments, unset records and declaration bounds.
+KCONFIG_SYMBOL = r'[A-Za-z0-9_./-]+'
 # Generated global Kconfig includes profiles for ALL boards, not just our target.
 MAX_KCONFIG = 16 * 1024 * 1024
 MAX_MK = 1024 * 1024
@@ -233,15 +236,19 @@ def check_config(data, settings):
     text = data.decode('utf-8')
     need(not any(ord(c) < 32 and c not in '\n\t' for c in text), 'config-syntax')
     values = {}
-    value_pattern = r'(?:y|m|n|-?[0-9]+|0x[0-9A-Fa-f]+|"(?:[^"\\]|\\.)*")'
-    for line in text.splitlines():
+    # confdata.c preserves optional 0x/0X hex prefixes; visible int/hex without
+    # defaults can serialize an empty value. Types are not tagged in .config;
+    # the security-critical target/ABI values below still require exact matches.
+    value_pattern = r'(?:y|m|n|-?[0-9]+|(?:0[xX])?[0-9A-Fa-f]+|"(?:[^"\\]|\\.)*"|)'
+    # Kconfig records end at LF, not Unicode separators inside quoted strings.
+    for line in text.split('\n'):
         if not line or line.startswith('#'):
-            match = re.fullmatch(r'# (CONFIG_[A-Za-z0-9_-]+) is not set', line)
+            match = re.fullmatch(r'# (CONFIG_' + KCONFIG_SYMBOL + ') is not set', line)
             if not match:
                 continue
             key, value = match.group(1), 'n'
         else:
-            match = re.fullmatch(r'(CONFIG_[A-Za-z0-9_-]+)=(' + value_pattern + ')', line)
+            match = re.fullmatch(r'(CONFIG_' + KCONFIG_SYMBOL + ')=(' + value_pattern + ')', line)
             need(match is not None, 'config-syntax')
             key, value = match.groups()
         need(key not in values, 'config-duplicate')
@@ -286,14 +293,14 @@ def check_config(data, settings):
 def check_generated_target(data, settings, selected):
     text = data.decode('utf-8')
     need(not any(ord(c) < 32 and c not in '\n\t' for c in text), 'target-kconfig-syntax')
-    declarations = list(re.finditer(r'(?m)^[ \t]*(config|menuconfig) ([A-Za-z0-9_-]+)[ \t]*$', text))
+    declarations = list(re.finditer(r'(?m)^[ \t]*(config|menuconfig) (' + KCONFIG_SYMBOL + r')[ \t]*$', text))
     found = []
     for index, match in enumerate(declarations):
         if 'CONFIG_' + match.group(2) != selected:
             continue
         end = declarations[index + 1].start() if index + 1 < len(declarations) else len(text)
         block = text[match.end():end]
-        lines = [line.strip() for line in block.splitlines()]
+        lines = [line.strip() for line in block.split('\n')]
         target = 'TARGET_' + config_symbol(settings['target'] + '_' + settings['subtarget'])
         need(any(re.match(r'bool(?:\s|$)', line) for line in lines) and
              'depends on ' + target in lines and

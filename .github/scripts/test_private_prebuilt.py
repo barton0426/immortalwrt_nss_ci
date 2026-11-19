@@ -418,6 +418,102 @@ class ReaderTests(unittest.TestCase):
             self.save_settings()
             self.reject(reason)
 
+    def test_fixed_openwrt_kconfig_output_syntax_not_an_sdk(self):
+        # Synthetic records reproduce output from ONLY the fixed public
+        # scripts/config/conf tool at 6dae72b163fdcc042c959463dab2e0c9bbfa587c.
+        # No compiler, SDK, firmware or ELF is invoked by this regression.
+        # lexer.l permits ./ (not +); confdata.c writes strings and scalar
+        # spellings literally, including visible int/hex without defaults.
+        suffix = ('CONFIG_PACKAGE_gstreamer1.0=y\n'
+                  'CONFIG_PACKAGE_fixture/variant=m\n'
+                  '# CONFIG_PACKAGE_disabled1.0 is not set\n'
+                  '# CONFIG_PACKAGE_disabled/variant is not set\n'
+                  'CONFIG_SYNTHETIC_NEGATIVE=-17\n'
+                  'CONFIG_SYNTHETIC_HEX_LOWER=0xAbCd\n'
+                  'CONFIG_SYNTHETIC_HEX_UPPER=0XAbCd\n'
+                  'CONFIG_SYNTHETIC_HEX_BARE=AbCd\n'
+                  'CONFIG_SYNTHETIC_EMPTY_INT=\n'
+                  'CONFIG_SYNTHETIC_EMPTY_HEX=\n'
+                  'CONFIG_SYNTHETIC_STRING="quote:\\" slash:\\\\ utf8:中文"\n'
+                  'CONFIG_SYNTHETIC_UNICODE="A\u0085B\u2028C\u2029D"\n')
+        for key in pb.TARGETS:
+            with self.subTest(target=key):
+                self.reset(key)
+                self.config_change('# Synthetic', suffix + '# Synthetic')
+                self.check()
+
+    def test_kconfig_dot_slash_unset_records_participate_in_duplicate_checks(self):
+        for symbol in ('PACKAGE_gstreamer1.0', 'PACKAGE_fixture/variant'):
+            records = ('CONFIG_' + symbol + '=y\n',
+                       '# CONFIG_' + symbol + ' is not set\n')
+            for first, second in ((0, 1), (1, 0), (1, 1)):
+                with self.subTest(symbol=symbol, order=(first, second)):
+                    self.reset()
+                    self.config_change('# Synthetic', records[first] + records[second] + '# Synthetic')
+                    self.reject('config-duplicate')
+
+    def test_kconfig_compatibility_keeps_bad_symbols_scalars_and_controls_rejected(self):
+        records = ('CONFIG_PACKAGE_bad++=y\n', 'CONFIG_PACKAGE_bad$name=y\n',
+                   'CONFIG_PACKAGE_bad name=y\n', 'CONFIG_=y\n',
+                   'CONFIG_BAD=0xZZ\n', 'CONFIG_BAD=0x\n', 'CONFIG_BAD=0X\n',
+                   'CONFIG_BAD=+1\n', 'CONFIG_BAD=-AB\n', 'CONFIG_BAD=12.5\n',
+                   'CONFIG_BAD=nan\n', 'CONFIG_BAD=not-a-scalar\n',
+                   'CONFIG_BAD=$(whoami)\n', 'CONFIG_BAD="ok"garbage\n',
+                   'CONFIG_BAD="unterminated\n', 'CONFIG_BAD="bad\nline"\n',
+                   'CONFIG_BAD="bad\rvalue"\n', 'CONFIG_BAD="bad\0value"\n',
+                   'CONFIG_BAD="bad\x1bvalue"\n', '# bad comment\r\n',
+                   'CONFIG_BAD=y\u2028CONFIG_HIDDEN=y\n')
+        for record in records:
+            with self.subTest(record=repr(record)):
+                self.reset()
+                self.config_change('# Synthetic', record + '# Synthetic')
+                self.reject('config-syntax')
+
+    def test_empty_critical_abi_values_and_other_targets_remain_rejected(self):
+        critical = ('CONFIG_HAVE_DOT_CONFIG', 'CONFIG_ARCH_64BIT', 'CONFIG_x86_64',
+                    'CONFIG_ARCH', 'CONFIG_USE_MUSL', 'CONFIG_LIBC', 'CONFIG_TARGET_SUFFIX',
+                    'CONFIG_TARGET_ARCH_PACKAGES', 'CONFIG_TARGET_BOARD',
+                    'CONFIG_TARGET_SUBTARGET', 'CONFIG_TARGET_x86', 'CONFIG_TARGET_x86_64',
+                    'CONFIG_TARGET_x86_64_DEVICE_generic')
+        for name in critical:
+            with self.subTest(empty=name):
+                self.reset()
+                line = next(line for line in self.config.decode().split('\n') if line.startswith(name + '='))
+                self.config_change(line, name + '=')
+                self.reject('config-target-or-abi')
+        for record, reason in (('CONFIG_TARGET_armsr=y\n', 'config-multiple-targets'),
+                               ('CONFIG_TARGET_x86_other.name=y\n', 'config-multiple-targets'),
+                               ('CONFIG_TARGET_x86_other/variant=m\n', 'config-multiple-targets'),
+                               ('CONFIG_TARGET_DEVICE_x86_64_DEVICE_other.name=y\n', 'config-multiple-targets'),
+                               ('CONFIG_EXTERNAL_TOOLCHAIN=\n', 'config-target-or-abi')):
+            with self.subTest(record=record):
+                self.reset()
+                self.config_change('# Synthetic', record + '# Synthetic')
+                self.reject(reason)
+
+    def test_generated_target_dot_slash_declarations_are_real_block_boundaries(self):
+        generated = self.buildroot / 'tmp/.config-target.in'
+        selected = 'CONFIG_TARGET_x86_64_DEVICE_generic'
+        for name in ('OTHER.name', 'OTHER/variant'):
+            with self.subTest(declaration=name):
+                # The next symbol's bool/depends cannot validate our incomplete
+                # selected declaration, even when its name contains ./.
+                incomplete = ('config TARGET_x86_64_DEVICE_generic\n\n' +
+                              'config ' + name + '\n\tbool "Synthetic next symbol"\n' +
+                              '\tdepends on TARGET_x86_64\n')
+                generated.write_text(incomplete)
+                with self.assertRaisesRegex(pb.Rejected, 'target-kconfig-device'):
+                    pb.check_generated_target(incomplete.encode(), self.settings, selected)
+                complete = incomplete.replace('generic\n\n',
+                                              'generic\n\tbool "Synthetic selected"\n' +
+                                              '\tdepends on TARGET_x86_64\n\n')
+                pb.check_generated_target(complete.encode(), self.settings, selected)
+        # Unicode separators do not synthesize a dependency line in Kconfig.
+        false_lines = ('config TARGET_x86_64_DEVICE_generic\n' +
+                       '\tbool "Synthetic"\u2028depends on TARGET_x86_64\n')
+        with self.assertRaisesRegex(pb.Rejected, 'target-kconfig-device'):
+            pb.check_generated_target(false_lines.encode(), self.settings, selected)
+
     def test_config_abi_and_multiple_device_refusals(self):
         for before, after in [('CONFIG_ARCH_64BIT=y', 'CONFIG_ARCH_64BIT=n'),
                               ('CONFIG_x86_64=y', 'CONFIG_x86_64=n'),
