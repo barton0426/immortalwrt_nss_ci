@@ -258,6 +258,7 @@ def check_config(data, settings):
     base = 'CONFIG_TARGET_' + config_symbol(board + '_' + subtarget)
     multi = values.get('CONFIG_TARGET_MULTI_PROFILE', 'n') == 'y'
     need(values.get('CONFIG_TARGET_MULTI_PROFILE', 'n') in ('y', 'n'), 'config-target-or-abi')
+    need(values.get('CONFIG_TARGET_PER_DEVICE_ROOTFS', 'n') in ('y', 'n'), 'config-target-or-abi')
     device = device_symbol(settings, multi)
     expected = {
         'CONFIG_HAVE_DOT_CONFIG': 'y',
@@ -285,6 +286,10 @@ def check_config(data, settings):
             need(key == 'CONFIG_TARGET_' + board, 'config-multiple-targets')
         if key.startswith('CONFIG_TARGET_' + board + '_'):
             need(key in (base, device), 'config-multiple-targets')
+        # This exact boolean image policy is not a target/device selector.
+        # Keep the broad rejection below for every other DEVICE-shaped symbol.
+        if key == 'CONFIG_TARGET_PER_DEVICE_ROOTFS':
+            continue
         if re.fullmatch(r'CONFIG_TARGET_.*_DEVICE_.*', key) or key.startswith('CONFIG_TARGET_DEVICE_'):
             need(key == device, 'config-multiple-targets')
     return device

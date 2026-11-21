@@ -290,6 +290,79 @@ class ReaderTests(unittest.TestCase):
         self.config_change('# Synthetic', 'CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_other=y\n# Synthetic')
         self.reject('config-multiple-targets')
 
+    def test_per_device_rootfs_policy_is_not_a_device_selector(self):
+        for key in pb.TARGETS:
+            for multi in (False, True):
+                for value in ('y', 'n'):
+                    with self.subTest(key=key, multi=multi, value=value):
+                        self.reset(key)
+                        if multi:
+                            single = pb.device_symbol(self.settings, False)
+                            selected = pb.device_symbol(self.settings, True)
+                            self.config_change(single + '=y', '# ' + single + ' is not set\n' +
+                                               'CONFIG_TARGET_MULTI_PROFILE=y\n' + selected + '=y')
+                        self.config_change('# Synthetic', 'CONFIG_TARGET_PER_DEVICE_ROOTFS=' +
+                                           value + '\n# Synthetic')
+                        bundle = self.check()
+                        self.assertEqual(bundle.settings['config_sha256'], pb.digest(self.config))
+                        self.assertEqual(pb.check_config(self.config, self.settings),
+                                         pb.device_symbol(self.settings, multi))
+
+    def test_per_device_rootfs_policy_requires_an_exact_boolean(self):
+        for multi in (False, True):
+            for value in ('m', '', '"y"', '1', '0', '-1', '0Xf'):
+                with self.subTest(multi=multi, value=value):
+                    self.reset()
+                    if multi:
+                        self.config_change(pb.device_symbol(self.settings, False) + '=y',
+                                           'CONFIG_TARGET_MULTI_PROFILE=y\n' +
+                                           pb.device_symbol(self.settings, True) + '=y')
+                    self.config_change('# Synthetic', 'CONFIG_TARGET_PER_DEVICE_ROOTFS=' +
+                                       value + '\n# Synthetic')
+                    self.reject('config-target-or-abi')
+
+    def test_rootfs_policy_does_not_loosen_other_device_or_alias_selection(self):
+        for key in pb.TARGETS:
+            for multi in (False, True):
+                for extra in (pb.device_symbol({'target': key[1], 'subtarget': key[2],
+                                                'device': key[4]}, not multi) + '=y',
+                              'CONFIG_TARGET_PER_DEVICE_ROOTFS_EXTRA=y',
+                              'CONFIG_TARGET_PER_DEVICE_ROOTFS.other=y',
+                              'CONFIG_TARGET_PER_DEVICE_ROOTFS/variant=m',
+                              'CONFIG_TARGET_DEVICE_PER_DEVICE_ROOTFS=y',
+                              'CONFIG_TARGET_DEVICE_x86_64_DEVICE_other=y',
+                              'CONFIG_TARGET_DEVICE_armsr_armv8_DEVICE_other=m'):
+                    with self.subTest(key=key, multi=multi, extra=extra):
+                        self.reset(key)
+                        if multi:
+                            self.config_change(pb.device_symbol(self.settings, False) + '=y',
+                                               'CONFIG_TARGET_MULTI_PROFILE=y\n' +
+                                               pb.device_symbol(self.settings, True) + '=y')
+                        self.config_change('# Synthetic', 'CONFIG_TARGET_PER_DEVICE_ROOTFS=y\n' +
+                                           extra + '\n# Synthetic')
+                        self.reject('config-multiple-targets')
+
+    def test_rootfs_policy_keeps_config_hash_duplicate_and_abi_gates(self):
+        for mutation in ('unbound-config', 'duplicate-policy', 'other-abi', 'other-board'):
+            with self.subTest(mutation=mutation):
+                self.reset()
+                self.config_change(pb.device_symbol(self.settings, False) + '=y',
+                                   'CONFIG_TARGET_MULTI_PROFILE=y\n' +
+                                   pb.device_symbol(self.settings, True) + '=y')
+                self.config_change('# Synthetic', 'CONFIG_TARGET_PER_DEVICE_ROOTFS=y\n# Synthetic')
+                if mutation == 'unbound-config':
+                    (self.buildroot / '.config').write_bytes(self.config + b'# changed raw config\n')
+                    self.reject('config-hash')
+                elif mutation == 'duplicate-policy':
+                    self.config_change('# Synthetic', 'CONFIG_TARGET_PER_DEVICE_ROOTFS=n\n# Synthetic')
+                    self.reject('config-duplicate')
+                elif mutation == 'other-abi':
+                    self.config_change('CONFIG_ARCH="x86_64"', 'CONFIG_ARCH="aarch64"')
+                    self.reject('config-target-or-abi')
+                else:
+                    self.config_change('CONFIG_TARGET_BOARD="x86"', 'CONFIG_TARGET_BOARD="armsr"')
+                    self.reject('config-target-or-abi')
+
     def test_generated_target_selector_is_required_and_hash_bound(self):
         generated = self.buildroot / 'tmp/.config-target.in'
         generated.write_text('config OTHER\n\tbool "Not selected"\n')
