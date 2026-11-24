@@ -397,6 +397,8 @@ class Build:
         write_json(publish / 'BUILD-RECEIPT.json', metadata)
         shutil.copyfile(self.root / '.config', publish / 'effective.config')
         shutil.copyfile(self.state / 'cli-input/PREBUILT-INPUT.json', publish / 'PREBUILT-INPUT.json')
+        if self.choice == 'x86-64':
+            shutil.copyfile(self.state / 'X86-GPT.json', publish / 'X86-GPT.json')
         files = {path.name: sha256(path) for path in sorted(publish.iterdir())}
         write_json(self.state / 'PUBLISH.json', {'schema_version': 1, 'complete': True,
                                               'firmware_complete': True, 'asset_directory': 'publish',
@@ -408,6 +410,9 @@ class Build:
         need(fetched.get('credential_persisted') is False and transport.SHA40.fullmatch(fetched.get('paired_commit', '')),
              'verified-source-fetch-required')
         self.clone_firmware(revision)
+        if self.choice == 'x86-64':
+            self.run('x86-gpt-prepare', ['python3', '-I', '-B', str(HERE / 'x86-gpt-image.py'),
+                                         'prepare', str(self.root), str(self.state)])
         self.run('public-feed-update', ['./scripts/feeds', 'update', '-a'])
         self.run('public-feed-install', ['./scripts/feeds', 'install', '-a'])
         self.script('ordinary-packages', 'Scripts/Packages.sh')
@@ -430,12 +435,18 @@ class Build:
         source = self.cli(fetched, revision)
         self.script('ordinary-rust', '.github/scripts/prepare-rust.sh')
         jobs = '-j' + str(max(1, os.cpu_count() or 1))
+        if self.choice == 'x86-64':
+            self.run('x86-gpt-recheck', ['python3', '-I', '-B', str(HERE / 'x86-gpt-image.py'),
+                                         'recheck', str(self.root), str(self.state)])
         self.run('firmware-download', ['make', jobs, 'download'])
         if self.run('firmware-parallel', ['make', jobs], allow_failure=True) != 0:
             self.run('firmware-serial', ['make', '-j1', 'V=s'])
         self.run('final-prebuilt-recheck', ['python3', '-I', '-B', str(HERE / 'private-prebuilt.py'), 'check-prepared',
                                            '--buildroot', str(self.root), '--input', self.env['PRIVATE_PREBUILT_INPUT'],
                                            '--prepared', self.env['PRIVATE_PREBUILT_DIR']])
+        if self.choice == 'x86-64':
+            self.run('x86-gpt-verify', ['python3', '-I', '-B', str(HERE / 'x86-gpt-image.py'),
+                                        'verify', str(self.root), str(self.state)])
         self.products(fetched, revision, source)
 
 

@@ -34,7 +34,7 @@ import zlib
 SCHEMA = 3
 INPUT = 'PREBUILT-INPUT.json'
 MANIFEST = 'PREBUILT-MANIFEST.json'
-VERSION = '1.15.0-alpha.13-private.1'
+VERSION = '1.15.0-alpha.13-private.2'
 GO_VERSION = '1.26.10'
 MODULE = 'github.com/sagernet/sing-box'
 TAGS = ('http2legacy,with_acme,with_clash_api,with_dhcp,with_gvisor,with_quic,'
