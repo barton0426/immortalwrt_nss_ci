@@ -217,6 +217,13 @@ class Build:
         # These files were just exported in this job. Preserve the original recipe
         # hash/manifest, then replace only this runner copy with the data-only recipe.
         write_json(feed / 'SOURCE-FEED-MANIFEST.json', original)
+        # This manual personal firmware uses the paired private Core on new
+        # installs. Keep upstream/default source and preserved upgrade UCI alone.
+        defaults = feed / 'luci-app-homeproxy/root/etc/config/homeproxy'
+        default_data = defaults.read_bytes()
+        official = b"\toption backend 'official'\n"
+        need(default_data.count(official) == 1, 'paired-default-backend-invalid')
+        defaults.write_bytes(default_data.replace(official, b"\toption backend 'private'\n"))
         old_recipe.write_bytes((HERE / 'prebuilt-box.Makefile').read_bytes())
         shutil.copyfile(HERE / 'private-prebuilt.py', feed / 'box-private/private-prebuilt.py')
         inventory = {}
@@ -383,6 +390,7 @@ class Build:
         self.run('retain-paired-source', ['git', '-c', 'core.hooksPath=/dev/null', 'archive', '--format=tar.gz',
                                           '--output=' + str(publish / 'paired-source.tar.gz'), fetched['paired_commit']],
                  cwd=self.state / 'source')
+        self.archive('paired-feed.tar.gz', [('personal_private', self.state / 'feed')])
         self.archive('private-build-logs.tar.gz', [('logs', self.state / 'logs'),
                                                   ('reports', self.state / 'workspace/build-reports')])
         # The small record binds config and inputs; it does not claim device testing.
@@ -393,6 +401,7 @@ class Build:
                     'prebuilt_manifest_sha256': sha256(self.state / 'prepared/PREBUILT-MANIFEST.json'),
                     'cli_runtime_evidence': json.loads((self.state / 'cli' / ('runtime-evidence-' + arch + '.json')).read_text()),
                     'router_runtime_tested': False, 'native_bypass_enabled_by_build': False,
+                     'homeproxy_default_backend': 'private', 'existing_upgrade_uci_preserved': True,
                     'shared_cache_used': False, 'public_artifact_upload': False}
         write_json(publish / 'BUILD-RECEIPT.json', metadata)
         shutil.copyfile(self.root / '.config', publish / 'effective.config')

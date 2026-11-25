@@ -33,7 +33,7 @@ define Package/box-private
   CATEGORY:=Network
   SUBMENU:=Web Servers/Proxies
   TITLE:=Unofficial prebuilt private CLI (no service)
-  DEPENDS:=+ca-bundle +kmod-inet-diag +kmod-netlink-diag +kmod-tun
+  DEPENDS:=+ca-bundle +kmod-inet-diag +kmod-netlink-diag +kmod-tun +kmod-nft-queue +kmod-nf-conntrack-netlink
 endef
 
 define Package/box-private/description
