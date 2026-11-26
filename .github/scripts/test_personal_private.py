@@ -319,6 +319,135 @@ class TransportTests(unittest.TestCase):
 
 
 class BuildTests(unittest.TestCase):
+    def feed_fixture(self, defaults=b"config homeproxy 'main'\n", installation='correct'):
+        # Export/install are simulated; NEVER run private source, feeds, or an SDK.
+        temp = tempfile.TemporaryDirectory(prefix='personal-paired-feed-test-')
+        self.addCleanup(temp.cleanup)
+        base = Path(temp.name).resolve()
+        state, root = base / 'state', base / 'firmware'
+        state.mkdir(mode=0o700)
+        root.mkdir(mode=0o700)
+        build = b.Build(state, ROOT, root, 'x86-64')
+        feed = state / 'feed'
+        feed.mkdir(mode=0o700)
+        aliases = root / 'package/feeds/ordinary'
+        aliases.mkdir(parents=True)
+        for name in b.PAIRED_PACKAGES:
+            package = feed / name
+            package.mkdir()
+            (package / 'Makefile').write_text('# SYNTHETIC exported recipe\n')
+            old = root / 'package/packages' / name
+            old.mkdir(parents=True)
+            (old / 'Makefile').write_text('# SYNTHETIC ordinary ' + name + '\n')
+            (aliases / name).symlink_to(root / 'feeds/removed' / name, target_is_directory=True)
+        (aliases / 'unrelated-package').symlink_to(root / 'feeds/unrelated', target_is_directory=True)
+        default_path = feed / 'luci-app-homeproxy/root/etc/config/homeproxy'
+        default_path.parent.mkdir(parents=True)
+        default_path.write_bytes(defaults)
+        manifest = {'schema_version': 1, 'complete': True, 'contains_patched_homeproxy': True,
+                    'core_version': b.CORE_VERSION, 'core_package': 'sing-box',
+                    'core_command': '/usr/bin/sing-box', 'single_core': True,
+                    'packages': list(b.PAIRED_PACKAGES),
+                    'files_sha256': {path.relative_to(feed).as_posix(): b.sha256(path)
+                                     for path in feed.rglob('*') if path.is_file()}}
+        (feed / 'FEED-MANIFEST.json').write_text(json.dumps(manifest))
+        (root / 'feeds.conf.default').write_text('src-git packages https://synthetic.invalid/packages\n')
+        calls = []
+        def run(label, args, **kwargs):
+            calls.append((label, args))
+            if label == 'private-feed-install' and installation != 'missing':
+                selected = root / 'package/feeds/personal_private'
+                selected.mkdir()
+                for name in b.PAIRED_PACKAGES:
+                    target = feed / name if installation != 'wrong' else state / 'ordinary-sing-box-source'
+                    (selected / name).symlink_to(target, target_is_directory=True)
+                if installation == 'duplicate':
+                    (aliases / 'sing-box').symlink_to(feed / 'sing-box', target_is_directory=True)
+            return 0
+        return build, feed, default_path, manifest, run, calls
+
+    def test_paired_feed_moves_both_ordinary_sources_preserves_factory_uci_and_installs_only_pair(self):
+        for defaults in (b"config homeproxy 'main'\n", b"\toption backend 'official'\n",
+                         b"\toption backend 'private'\n"):
+            with self.subTest(defaults=defaults):
+                build, feed, default_path, original, run, calls = self.feed_fixture(defaults)
+                with patch.object(build, 'run', side_effect=run):
+                    build.paired_feed()
+                self.assertEqual(default_path.read_bytes(), defaults)
+                self.assertEqual(json.loads((feed / 'SOURCE-FEED-MANIFEST.json').read_text()), original)
+                current = json.loads((feed / 'FEED-MANIFEST.json').read_text())
+                self.assertEqual(current['packages'], list(b.PAIRED_PACKAGES))
+                self.assertTrue(current['prebuilt_core_recipe'])
+                self.assertEqual(current['files_sha256'], {path.relative_to(feed).as_posix(): b.sha256(path)
+                    for path in feed.rglob('*') if path.is_file() and path.name != 'FEED-MANIFEST.json'})
+                self.assertEqual((feed / 'sing-box/Makefile').read_bytes(), (HERE / 'prebuilt-box.Makefile').read_bytes())
+                self.assertEqual((feed / 'sing-box/private-prebuilt.py').read_bytes(),
+                                 (HERE / 'private-prebuilt.py').read_bytes())
+                for name, backup in (('sing-box', 'ordinary-sing-box-source'),
+                                     ('luci-app-homeproxy', 'ordinary-homeproxy-source')):
+                    self.assertFalse(os.path.lexists(build.root / 'package/packages' / name))
+                    self.assertEqual((build.state / backup / 'Makefile').read_text(),
+                                     '# SYNTHETIC ordinary ' + name + '\n')
+                    self.assertEqual((build.root / 'package/feeds/personal_private' / name).resolve(), feed / name)
+                    self.assertFalse(os.path.lexists(build.root / 'package/feeds/ordinary' / name))
+                self.assertTrue((build.root / 'package/feeds/ordinary/unrelated-package').is_symlink())
+                self.assertEqual(calls[-1], ('private-feed-install',
+                    ['./scripts/feeds', 'install', '-f', '-p', 'personal_private', *b.PAIRED_PACKAGES]))
+                self.assertFalse((feed / 'box-private').exists())
+                self.assertFalse((feed / 'luci-app-homeproxy-private').exists())
+
+    def test_paired_feed_rejects_extra_packages_old_version_or_changed_inventory_before_moves(self):
+        for problem in ('legacy-package', 'duplicate-package', 'old-version', 'not-single-core',
+                        'extra-root', 'changed-file'):
+            with self.subTest(problem=problem):
+                build, feed, default_path, manifest, run, calls = self.feed_fixture()
+                if problem == 'legacy-package':
+                    manifest['packages'].append('box-private')
+                elif problem == 'duplicate-package':
+                    manifest['packages'].append('sing-box')
+                elif problem == 'old-version':
+                    manifest['core_version'] = '1.15.0-alpha.13-private.2'
+                elif problem == 'not-single-core':
+                    manifest['single_core'] = False
+                elif problem == 'extra-root':
+                    (feed / 'box-private').mkdir()
+                else:
+                    default_path.write_bytes(b'tampered')
+                (feed / 'FEED-MANIFEST.json').write_text(json.dumps(manifest))
+                with patch.object(build, 'run', side_effect=run), self.assertRaises(b.transport.Rejected):
+                    build.paired_feed()
+                self.assertTrue((build.root / 'package/packages/sing-box/Makefile').is_file())
+                self.assertFalse((build.state / 'ordinary-sing-box-source').exists())
+                self.assertEqual([label for label, args in calls], ['export-paired-feed'])
+
+    def test_all_source_backup_and_alias_paths_are_checked_before_first_move(self):
+        for problem in ('second-source-link', 'second-backup-exists', 'alias-is-file'):
+            with self.subTest(problem=problem):
+                build, feed, default_path, manifest, run, calls = self.feed_fixture()
+                if problem == 'second-source-link':
+                    old = build.root / 'package/packages/luci-app-homeproxy'
+                    saved = build.root / 'saved-homeproxy'
+                    old.rename(saved)
+                    old.symlink_to(saved, target_is_directory=True)
+                elif problem == 'second-backup-exists':
+                    (build.state / 'ordinary-homeproxy-source').mkdir()
+                else:
+                    alias = build.root / 'package/feeds/ordinary/luci-app-homeproxy'
+                    alias.unlink()
+                    alias.write_text('not a feed alias')
+                with patch.object(build, 'run', side_effect=run), self.assertRaises(b.transport.Rejected):
+                    build.paired_feed()
+                self.assertTrue((build.root / 'package/packages/sing-box/Makefile').is_file())
+                self.assertFalse((build.state / 'ordinary-sing-box-source').exists())
+                self.assertTrue((build.root / 'package/feeds/ordinary/sing-box').is_symlink())
+
+    def test_feed_install_must_create_unique_links_to_this_exact_pair(self):
+        for installation in ('missing', 'wrong', 'duplicate'):
+            with self.subTest(installation=installation):
+                build, feed, default_path, manifest, run, calls = self.feed_fixture(installation=installation)
+                with patch.object(build, 'run', side_effect=run), self.assertRaises((b.transport.Rejected, OSError)):
+                    build.paired_feed()
+
     def configuration_fixture(self):
         # Reuse pure synthetic records, NEVER a real SDK, CLI execution or firmware.
         fixtures = load('personal_config_snapshot_fixtures', HERE / 'test_private_prebuilt.py')
@@ -327,8 +456,7 @@ class BuildTests(unittest.TestCase):
         state = fixture.root / 'state'
         state.mkdir(mode=0o700)
         build = b.Build(state, ROOT, fixture.buildroot, 'x86-64')
-        required = ''.join('CONFIG_PACKAGE_' + name + '=y\n' for name in
-                           ('box-private', 'luci-app-homeproxy', 'luci-app-homeproxy-private', 'sing-box'))
+        required = ''.join('CONFIG_PACKAGE_' + name + '=y\n' for name in b.PAIRED_PACKAGES)
         fixture.config += (required + '# CONFIG_PACKAGE_fwknopd is not set\n' +
                            'CONFIG_PACKAGE_fixture1.0=m\nCONFIG_SYNTHETIC_EMPTY=\n' +
                            'CONFIG_SYNTHETIC_HEX=0XAbCd\n').encode()
@@ -406,14 +534,28 @@ class BuildTests(unittest.TestCase):
                 self.assertEqual(report['target_config_preflight'], 'passed')
                 self.assertFalse((build.state / 'PUBLISH.json').exists())
 
-    def test_configuration_snapshot_requires_all_four_paired_packages(self):
-        build, fixture, output = self.configuration_fixture()
-        (fixture.buildroot / '.config').write_bytes(fixture.config.replace(
-            b'CONFIG_PACKAGE_luci-app-homeproxy=y\n', b''))
-        with self.assertRaisesRegex(b.transport.Rejected, 'effective-configuration-rejected'):
-            build.configuration_report('e' * 40)
-        self.assertEqual(json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())['reason'],
-                         'paired-packages-not-selected')
+    def test_configuration_snapshot_requires_both_paired_packages(self):
+        for name in b.PAIRED_PACKAGES:
+            with self.subTest(name=name):
+                build, fixture, output = self.configuration_fixture()
+                (fixture.buildroot / '.config').write_bytes(fixture.config.replace(
+                    ('CONFIG_PACKAGE_' + name + '=y\n').encode(), b''))
+                with self.assertRaisesRegex(b.transport.Rejected, 'effective-configuration-rejected'):
+                    build.configuration_report('e' * 40)
+                self.assertEqual(json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())['reason'],
+                                 'paired-packages-not-selected')
+
+    def test_configuration_snapshot_rejects_legacy_core_or_metadata_selection(self):
+        for name in b.LEGACY_PACKAGES:
+            for value in ('y', 'm'):
+                with self.subTest(name=name, value=value):
+                    build, fixture, output = self.configuration_fixture()
+                    (fixture.buildroot / '.config').write_bytes(fixture.config +
+                        ('CONFIG_PACKAGE_' + name + '=' + value + '\n').encode())
+                    with self.assertRaisesRegex(b.transport.Rejected, 'effective-configuration-rejected'):
+                        build.configuration_report('e' * 40)
+                    self.assertEqual(json.loads((output / 'CONFIG-SNAPSHOT.json').read_text())['reason'],
+                                     'legacy-paired-package-selected')
 
     def test_configuration_snapshot_never_overwrites_prior_evidence(self):
         build, fixture, output = self.configuration_fixture()
@@ -539,8 +681,23 @@ sys.exit(7)
                 self.assertNotIn('CONFIG_TARGET_ALL_PROFILES=y', result)
                 self.assertIn('CONFIG_TARGET_ROOTFS_PARTSIZE=4096', result)
                 self.assertIn('CONFIG_PACKAGE_luci-app-dockerman=y', result)
-                for package in ('box-private', 'sing-box', 'luci-app-homeproxy', 'luci-app-homeproxy-private'):
-                    self.assertIn('CONFIG_PACKAGE_' + package + '=y', result)
+                for package in b.PAIRED_PACKAGES:
+                    self.assertEqual(result.splitlines().count('CONFIG_PACKAGE_' + package + '=y'), 1)
+                for package in b.LEGACY_PACKAGES:
+                    self.assertNotIn('CONFIG_PACKAGE_' + package + '=y', result)
+                self.assertEqual(b.select_target(result, choice), result)
+
+    def test_target_selection_normalizes_pair_and_removes_old_core_without_touching_other_packages(self):
+        unchanged = 'CONFIG_PACKAGE_sing-box-extra=y\nCONFIG_PACKAGE_xray-core=y\n'
+        content = unchanged + ''.join('CONFIG_PACKAGE_' + name + '=m\n' +
+            '# CONFIG_PACKAGE_' + name + ' is not set\n' for name in b.PAIRED_PACKAGES + b.LEGACY_PACKAGES)
+        result = b.select_target(content, 'x86-64')
+        self.assertTrue(result.startswith(unchanged))
+        for name in b.PAIRED_PACKAGES:
+            self.assertEqual(result.splitlines().count('CONFIG_PACKAGE_' + name + '=y'), 1)
+        for name in b.LEGACY_PACKAGES:
+            self.assertNotIn('CONFIG_PACKAGE_' + name + '=', result)
+        self.assertEqual(b.select_target(result, 'x86-64'), result)
 
     def test_build_environment_excludes_credentials_and_actions_cache_tokens(self):
         with patch.dict(os.environ, {'PERSONAL_PRIVATE_TOKEN': TOKEN, 'GITHUB_TOKEN': TOKEN,
@@ -563,8 +720,103 @@ sys.exit(7)
                          'luci-app-homeproxy-private_1.15.0-1_all.ipk',
                          'luci-app-homeproxy-old.apk', 'luci-app-homeproxy-20261111.apk.backup'):
             self.assertFalse(b.exact_package_filename('luci-app-homeproxy', filename))
-        self.assertTrue(b.exact_package_filename('box-private', 'box-private-1.15.0_alpha.13-private.1-r1.apk'))
-        self.assertTrue(b.exact_package_filename('box-private', 'box-private_1.15.0_alpha.13-private.1-1_x86_64.ipk'))
+        self.assertTrue(b.exact_package_filename('sing-box', 'sing-box-1.15.0_alpha13-r3.apk'))
+        self.assertTrue(b.exact_package_filename('sing-box', 'sing-box_1.15.0_alpha13-3_x86_64.ipk'))
+        self.assertFalse(b.exact_package_filename('sing-box', 'box-private-1.15.0_alpha13-r3.apk'))
+
+    def product_fixture(self, suffix='apk'):
+        # Identity/manifest fixtures only, NOT package payload or runtime validation.
+        temp = tempfile.TemporaryDirectory(prefix='personal-paired-products-test-')
+        self.addCleanup(temp.cleanup)
+        base = Path(temp.name).resolve()
+        images, packages = base / 'images', base / 'packages'
+        images.mkdir()
+        packages.mkdir()
+        core_version = b.CORE_APK_VERSION if suffix == 'apk' else b.CORE_IPK_VERSION
+        ui_version = '20261125-r1' if suffix == 'apk' else '20261125-1'
+        versions = {'sing-box': core_version, 'luci-app-homeproxy': ui_version}
+        files = {}
+        for name, version in versions.items():
+            filename = name + '-' + version + '.apk' if suffix == 'apk' else (
+                name + '_' + version + '_' + ('x86_64' if name == 'sing-box' else 'all') + '.ipk')
+            files[name] = packages / filename
+            files[name].write_bytes(b'SYNTHETIC package identity, not an actual package')
+        manifest = images / 'immortalwrt-x86-64-generic.manifest'
+        manifest.write_text('base-files - 1-r1\n' + ''.join(name + ' - ' + version + '\n'
+                            for name, version in versions.items()))
+        return images, packages, files, manifest, versions
+
+    def test_pair_artifact_names_versions_and_installed_manifests_are_bound(self):
+        for suffix in ('apk', 'ipk'):
+            with self.subTest(suffix=suffix):
+                images, packages, files, manifest, versions = self.product_fixture(suffix)
+                result = b.paired_product_inventory(images, packages, 'x86_64')
+                self.assertEqual(set(result['packages']), set(b.PAIRED_PACKAGES))
+                for name, record in result['packages'].items():
+                    self.assertEqual(record, {'filename': files[name].name, 'version': versions[name],
+                                              'sha256': b.sha256(files[name])})
+                self.assertEqual(result['firmware_manifests_sha256'], {manifest.name: b.sha256(manifest)})
+
+    def test_pair_artifacts_reject_old_core_metadata_duplicates_empty_or_linked_files(self):
+        for problem in ('old-core', 'box-private', 'metadata', 'tiny', 'missing-ui',
+                        'duplicate-core', 'empty-ui', 'linked-core'):
+            with self.subTest(problem=problem):
+                images, packages, files, manifest, versions = self.product_fixture()
+                if problem == 'old-core':
+                    files['sing-box'].rename(packages / 'sing-box-1.15.0_alpha13-r2.apk')
+                elif problem in ('box-private', 'metadata', 'tiny'):
+                    name = {'box-private': 'box-private', 'metadata': 'luci-app-homeproxy-private',
+                            'tiny': 'sing-box-tiny'}[problem]
+                    (packages / (name + '-1-r1.apk')).write_bytes(b'SYNTHETIC legacy')
+                elif problem == 'missing-ui':
+                    files['luci-app-homeproxy'].rename(packages / 'not-homeproxy.txt')
+                elif problem == 'duplicate-core':
+                    (packages / 'sing-box-1.15.0_alpha13-r1.apk').write_bytes(b'SYNTHETIC duplicate')
+                elif problem == 'empty-ui':
+                    files['luci-app-homeproxy'].write_bytes(b'')
+                else:
+                    saved = packages / 'saved-core'
+                    files['sing-box'].rename(saved)
+                    files['sing-box'].symlink_to(saved)
+                with self.assertRaises(b.transport.Rejected):
+                    b.paired_product_inventory(images, packages, 'x86_64')
+
+    def test_installed_manifest_rejects_missing_pair_old_version_legacy_or_duplicate_records(self):
+        for problem in ('missing-manifest', 'missing-ui', 'old-core', 'box-private',
+                        'metadata', 'tiny', 'duplicate', 'malformed'):
+            with self.subTest(problem=problem):
+                images, packages, files, manifest, versions = self.product_fixture()
+                text = manifest.read_text()
+                if problem == 'missing-manifest':
+                    manifest.rename(images / 'not-a-manifest.txt')
+                elif problem == 'missing-ui':
+                    manifest.write_text('sing-box - ' + b.CORE_APK_VERSION + '\n')
+                elif problem == 'old-core':
+                    manifest.write_text(text.replace(b.CORE_APK_VERSION, '1.15.0_alpha13-r1'))
+                elif problem in ('box-private', 'metadata', 'tiny'):
+                    name = {'box-private': 'box-private', 'metadata': 'luci-app-homeproxy-private',
+                            'tiny': 'sing-box-tiny'}[problem]
+                    manifest.write_text(text + name + ' - 1-r1\n')
+                elif problem == 'duplicate':
+                    manifest.write_text(text + 'sing-box - ' + b.CORE_APK_VERSION + '\n')
+                else:
+                    manifest.write_text(text + 'not a package record\n')
+                with self.assertRaises(b.transport.Rejected):
+                    b.paired_product_inventory(images, packages, 'x86_64')
+
+    def test_core_ipk_architecture_cannot_be_another_target(self):
+        images, packages, files, manifest, versions = self.product_fixture('ipk')
+        files['sing-box'].rename(packages / ('sing-box_' + b.CORE_IPK_VERSION + '_aarch64_generic.ipk'))
+        with self.assertRaisesRegex(b.transport.Rejected, 'paired-package-architecture-mismatch'):
+            b.paired_product_inventory(images, packages, 'x86_64')
+
+    def test_receipt_records_single_core_without_claiming_runtime_or_backend_selection(self):
+        text = (HERE / 'personal-private-build.py').read_text()
+        self.assertIn("'core_package': 'sing-box', 'core_command': '/usr/bin/sing-box'", text)
+        self.assertIn("'homeproxy_backend_selection_required': False", text)
+        self.assertIn("'homeproxy_factory_config_preserved': True", text)
+        self.assertIn("'router_runtime_tested': False", text)
+        self.assertNotIn('homeproxy_default_backend', text)
 
     def test_only_meta_and_core_cannot_create_complete_publish_inventory(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -682,7 +934,10 @@ sys.exit(7)
         # Source inspection is scoped to our new helper, not execution of any SDK.
         content = (HERE / 'personal-private-build.py').read_text(encoding='utf-8')
         self.assertLess(content.index('old.resolve(strict=True) == old'), content.index('shutil.move(str(old)'))
-        self.assertIn("self.root / 'package/packages/luci-app-homeproxy'", content)
+        self.assertIn("('sing-box', 'ordinary-sing-box-source')", content)
+        self.assertIn("('luci-app-homeproxy', 'ordinary-homeproxy-source')", content)
+        self.assertLess(content.index('alias.parent.resolve(strict=True) == alias.parent'),
+                        content.index('alias.unlink()'))
         self.assertNotIn('rm -rf', content)
 
 

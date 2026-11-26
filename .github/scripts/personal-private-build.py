@@ -33,6 +33,11 @@ TARGETS = {
     'ipq807x-redmi_ax6-stock': ('IPQ807X-WIFI-YES', 'arm64', 'qualcommax', 'ipq807x', 'aarch64_cortex-a53', 'redmi_ax6-stock'),
 }
 PUBLIC_SOURCE = 'https://github.com/VIKINGYFY/immortalwrt.git'
+PAIRED_PACKAGES = ('sing-box', 'luci-app-homeproxy')
+LEGACY_PACKAGES = ('box-private', 'luci-app-homeproxy-private', 'sing-box-tiny')
+CORE_VERSION = '1.15.0-alpha.13-private.3'
+CORE_APK_VERSION = '1.15.0_alpha13-r3'
+CORE_IPK_VERSION = '1.15.0_alpha13-3'
 
 
 def safe_environment(state, checkout, choice):
@@ -68,13 +73,14 @@ def safe_environment(state, checkout, choice):
 def select_target(content, choice):
     config, arch, target, subtarget, package_arch, device = TARGETS[choice]
     # Do not inherit the public ZN M2/AX6 sibling selection or ALL_PROFILES.
+    package_symbols = '|'.join(re.escape(name) for name in PAIRED_PACKAGES + LEGACY_PACKAGES)
     lines = [line for line in content.splitlines()
-             if not re.match(r'^\s*#?\s*CONFIG_TARGET_(?:DEVICE_|ALL_PROFILES|MULTI_PROFILE|[a-z0-9]+(?:_|=))', line)]
+             if not re.match(r'^\s*#?\s*CONFIG_TARGET_(?:DEVICE_|ALL_PROFILES|MULTI_PROFILE|[a-z0-9]+(?:_|=))', line)
+             and not re.match(r'^\s*#?\s*CONFIG_PACKAGE_(?:' + package_symbols + r')(?:=|\s+is not set\s*$)', line)]
     lines += ['CONFIG_TARGET_' + target + '=y', 'CONFIG_TARGET_' + target + '_' + subtarget + '=y',
               'CONFIG_TARGET_DEVICE_' + target + '_' + subtarget + '_DEVICE_' + device + '=y',
-              '# CONFIG_TARGET_ALL_PROFILES is not set', 'CONFIG_TARGET_MULTI_PROFILE=y',
-              'CONFIG_PACKAGE_box-private=y', 'CONFIG_PACKAGE_luci-app-homeproxy=y',
-              'CONFIG_PACKAGE_luci-app-homeproxy-private=y', 'CONFIG_PACKAGE_sing-box=y']
+              '# CONFIG_TARGET_ALL_PROFILES is not set', 'CONFIG_TARGET_MULTI_PROFILE=y']
+    lines += ['CONFIG_PACKAGE_' + name + '=y' for name in PAIRED_PACKAGES]
     return '\n'.join(lines) + '\n'
 
 
@@ -85,6 +91,51 @@ def exact_package_filename(name, filename):
     stem = re.escape(name)
     return bool(re.fullmatch(stem + r'-[0-9][A-Za-z0-9.+_~:-]*\.apk', filename) or
                 re.fullmatch(stem + r'_[0-9][A-Za-z0-9.+_~:-]*_[A-Za-z0-9_]+\.ipk', filename))
+
+
+def paired_product_inventory(images, packages, package_arch):
+    """Check delivery identities against the producer's installed-package manifest."""
+    entries = list(packages.iterdir())
+    need(not any(exact_package_filename(name, path.name) for path in entries
+                 for name in LEGACY_PACKAGES), 'legacy-paired-package-artifact')
+    artifacts = {}
+    for name in PAIRED_PACKAGES:
+        matches = [path for path in entries if exact_package_filename(name, path.name)]
+        need(len(matches) == 1, 'paired-package-artifacts-missing-or-duplicate')
+        path = matches[0]
+        need(path.resolve(strict=True) == path and stat.S_ISREG(path.lstat().st_mode) and
+             path.stat().st_nlink == 1 and 0 < path.stat().st_size <= transport.MAX_ASSET,
+             'paired-package-artifact-invalid')
+        if path.suffix == '.apk':
+            version = path.name[len(name) + 1:-4]
+        else:
+            arch = 'all' if name == 'luci-app-homeproxy' and path.name.endswith('_all.ipk') else package_arch
+            suffix = '_' + arch + '.ipk'
+            need(path.name.endswith(suffix), 'paired-package-architecture-mismatch')
+            version = path.name[len(name) + 1:-len(suffix)]
+        if name == 'sing-box':
+            need(version == (CORE_APK_VERSION if path.suffix == '.apk' else CORE_IPK_VERSION),
+                 'paired-core-package-version-mismatch')
+        artifacts[name] = {'filename': path.name, 'version': version, 'sha256': sha256(path)}
+    manifests = list(images.glob('*.manifest'))
+    need(manifests, 'firmware-package-manifest-missing')
+    hashes = {}
+    for path in manifests:
+        need(path.resolve(strict=True) == path and stat.S_ISREG(path.lstat().st_mode) and
+             path.stat().st_nlink == 1 and path.stat().st_size <= 8 * 1024 * 1024,
+             'firmware-package-manifest-invalid')
+        installed = {}
+        for line in path.read_text(encoding='utf-8').splitlines():
+            if not line:
+                continue
+            match = re.fullmatch(r'([A-Za-z0-9+_.-]+) - ([A-Za-z0-9.+_~:-]+)', line)
+            need(match is not None and match[1] not in installed, 'firmware-package-manifest-invalid')
+            installed[match[1]] = match[2]
+        need(not any(name in installed for name in LEGACY_PACKAGES), 'legacy-paired-package-installed')
+        need(all(installed.get(name) == item['version'] for name, item in artifacts.items()),
+             'firmware-paired-packages-mismatch')
+        hashes[path.name] = sha256(path)
+    return {'packages': artifacts, 'firmware_manifests_sha256': hashes}
 
 
 def archive_tree(output, paths):
@@ -208,52 +259,75 @@ class Build:
     def paired_feed(self):
         source, feed = self.state / 'source', self.state / 'feed'
         self.run('export-paired-feed', ['python3', '-I', '-B', str(source / '_downstream/openwrt/export-feed.py'), str(feed)])
+        feed = directory(feed)
         original_manifest = (feed / 'FEED-MANIFEST.json').read_bytes()
         original = json.loads(original_manifest)
-        need(original.get('complete') is True and original.get('contains_patched_homeproxy') is True,
-             'paired-feed-incomplete')
-        old_recipe = feed / 'box-private' / 'Makefile'
-        need(sha256(old_recipe) == original['files_sha256']['box-private/Makefile'], 'exported-recipe-changed')
-        # These files were just exported in this job. Preserve the original recipe
-        # hash/manifest, then replace only this runner copy with the data-only recipe.
-        write_json(feed / 'SOURCE-FEED-MANIFEST.json', original)
-        # This manual personal firmware uses the paired private Core on new
-        # installs. Keep upstream/default source and preserved upgrade UCI alone.
-        defaults = feed / 'luci-app-homeproxy/root/etc/config/homeproxy'
-        default_data = defaults.read_bytes()
-        official = b"\toption backend 'official'\n"
-        need(default_data.count(official) == 1, 'paired-default-backend-invalid')
-        defaults.write_bytes(default_data.replace(official, b"\toption backend 'private'\n"))
-        old_recipe.write_bytes((HERE / 'prebuilt-box.Makefile').read_bytes())
-        shutil.copyfile(HERE / 'private-prebuilt.py', feed / 'box-private/private-prebuilt.py')
+        need(type(original.get('schema_version')) is int and original['schema_version'] == 1 and
+             original.get('complete') is True and original.get('contains_patched_homeproxy') is True and
+             original.get('core_version') == CORE_VERSION and original.get('core_package') == 'sing-box' and
+             original.get('core_command') == '/usr/bin/sing-box' and original.get('single_core') is True and
+             isinstance(original.get('packages'), list) and
+             all(isinstance(name, str) for name in original['packages']) and
+             sorted(original['packages']) == sorted(PAIRED_PACKAGES), 'paired-feed-incomplete')
+        need({path.name for path in feed.iterdir()} == set(PAIRED_PACKAGES) | {'FEED-MANIFEST.json'},
+             'paired-feed-package-whitelist')
         inventory = {}
         for path in sorted(feed.rglob('*')):
+            need(path.resolve(strict=True) == path and not path.is_symlink(), 'feed-file-invalid')
             if path.is_dir():
                 continue
-            need(path.resolve(strict=True) == path and stat.S_ISREG(path.lstat().st_mode), 'feed-file-invalid')
-            if path.name != 'FEED-MANIFEST.json':
+            need(stat.S_ISREG(path.lstat().st_mode) and path.stat().st_nlink == 1, 'feed-file-invalid')
+            if path != feed / 'FEED-MANIFEST.json':
                 inventory[path.relative_to(feed).as_posix()] = sha256(path)
+        need(inventory == original.get('files_sha256') and 'sing-box/Makefile' in inventory and
+             'luci-app-homeproxy/Makefile' in inventory, 'exported-feed-changed')
+        # Preserve the paired manifest, then replace ONLY this runner's core recipe.
+        # HomeProxy factory UCI/runtime files remain byte-identical to the paired source.
+        write_json(feed / 'SOURCE-FEED-MANIFEST.json', original)
+        (feed / 'sing-box/Makefile').write_bytes((HERE / 'prebuilt-box.Makefile').read_bytes())
+        reader = feed / 'sing-box/private-prebuilt.py'
+        need(not os.path.lexists(reader), 'unexpected-exported-prebuilt-reader')
+        shutil.copyfile(HERE / 'private-prebuilt.py', reader)
+        inventory = {path.relative_to(feed).as_posix(): sha256(path) for path in sorted(feed.rglob('*'))
+                     if path.is_file() and path != feed / 'FEED-MANIFEST.json'}
         original.update(files_sha256=inventory, prebuilt_core_recipe=True,
                         source_export_sha256=hashlib.sha256(original_manifest).hexdigest())
         (feed / 'FEED-MANIFEST.json').write_text(json.dumps(original, sort_keys=True, indent=2) + '\n', encoding='utf-8')
-        # Packages.sh installs the ordinary HomeProxy here. Force-feed installation
-        # alone does NOT remove that duplicate source, so preserve/move this one
-        # exact directory out of package discovery before installing our pair.
-        old = self.root / 'package/packages/luci-app-homeproxy'
-        backup = self.state / 'ordinary-homeproxy-source'
-        need(old.resolve(strict=True) == old and old.is_dir() and not old.is_symlink() and
-             backup.parent.resolve(strict=True) == self.state and not os.path.lexists(backup),
-             'ordinary-homeproxy-location-invalid')
-        shutil.move(str(old), str(backup))
+        # Packages.sh installs both ordinary sources here. Validate ALL exact source,
+        # backup and same-name alias paths before moving/removing the first one.
+        moves = []
+        for name, backup_name in (('sing-box', 'ordinary-sing-box-source'),
+                                  ('luci-app-homeproxy', 'ordinary-homeproxy-source')):
+            old = self.root / 'package/packages' / name
+            backup = self.state / backup_name
+            need(old.resolve(strict=True) == old and old.is_dir() and not old.is_symlink() and
+                 backup.parent.resolve(strict=True) == self.state and not os.path.lexists(backup),
+                 'ordinary-paired-source-location-invalid')
+            moves.append((old, backup))
+        alias_root = directory(self.root / 'package/feeds')
+        aliases = []
+        for name in PAIRED_PACKAGES:
+            for alias in alias_root.glob('*/' + name):
+                need(alias.parent.resolve(strict=True) == alias.parent and alias.is_symlink(),
+                     'ordinary-paired-feed-alias-invalid')
+                aliases.append(alias)
         feed_config = self.root / 'feeds.conf'
-        need(not feed_config.exists(), 'unexpected-custom-feed-configuration')
+        need(not os.path.lexists(feed_config), 'unexpected-custom-feed-configuration')
         content = (self.root / 'feeds.conf.default').read_text(encoding='utf-8')
         need(not re.search(r'^src-\S+\s+personal_private\b', content, re.M), 'feed-name-collision')
+        for old, backup in moves:
+            shutil.move(str(old), str(backup))
+        for alias in aliases:
+            alias.unlink()  # Validated symlink itself only; never its target.
         feed_config.write_text(content + '\nsrc-link personal_private ' + str(feed) + '\n', encoding='utf-8')
         self.run('private-feed-update', ['./scripts/feeds', 'update', 'personal_private'])
-        self.run('private-feed-install', ['./scripts/feeds', 'install', '-f', '-p', 'personal_private',
-                                          'box-private', 'luci-app-homeproxy', 'luci-app-homeproxy-private'])
-        need(not old.exists(), 'ordinary-homeproxy-still-discoverable')
+        self.run('private-feed-install', ['./scripts/feeds', 'install', '-f', '-p', 'personal_private', *PAIRED_PACKAGES])
+        for name in PAIRED_PACKAGES:
+            alias = alias_root / 'personal_private' / name
+            need(alias.parent.resolve(strict=True) == alias.parent and alias.is_symlink() and
+                 alias.resolve(strict=True) == feed / name, 'paired-feed-link-mismatch')
+            need(list(alias_root.glob('*/' + name)) == [alias], 'paired-feed-duplicate-alias')
+        need(all(not os.path.lexists(old) for old, backup in moves), 'ordinary-paired-source-still-discoverable')
 
     def configuration_report(self, revision):
         # Preserve actual SDK inputs before the CLI, even when validation fails.
@@ -318,9 +392,11 @@ class Build:
             need(hashes == {item['buildroot_path']: item['sha256'] for name, item in inventory.items()
                             if name in ('target-board.Makefile', 'target-subtarget.mk', 'target-kconfig.in')},
                  'configuration-snapshot-changed')
-            need(all('CONFIG_PACKAGE_' + name + '=y' in config for name in
-                     ('box-private', 'luci-app-homeproxy', 'luci-app-homeproxy-private', 'sing-box')),
+            need(all('CONFIG_PACKAGE_' + name + '=y' in config for name in PAIRED_PACKAGES),
                  'paired-packages-not-selected')
+            need(not any('CONFIG_PACKAGE_' + name + '=' + value in config
+                         for name in LEGACY_PACKAGES for value in ('y', 'm')),
+                 'legacy-paired-package-selected')
             report['target_config_preflight'] = 'passed'
         except (reader.Rejected, transport.Rejected) as error:
             report.update(target_config_preflight='rejected', reason=str(error))
@@ -371,9 +447,7 @@ class Build:
         publish.mkdir(mode=0o700)
         images = directory(self.root / 'bin/targets' / target / subtarget)
         packages = directory(self.root / 'bin/packages' / package_arch / 'personal_private')
-        need(all(any(exact_package_filename(name, path.name) and path.is_file() and not path.is_symlink()
-                         for path in packages.iterdir()) for name in ('box-private', 'luci-app-homeproxy')),
-             'paired-package-artifacts-missing')
+        paired_products = paired_product_inventory(images, packages, package_arch)
         self.archive('firmware-and-packages.tar.gz', [('firmware', images), ('packages', packages)])
         source_archive = source.get('source_archive', {})
         name = source_archive.get('filename', '')
@@ -401,7 +475,10 @@ class Build:
                     'prebuilt_manifest_sha256': sha256(self.state / 'prepared/PREBUILT-MANIFEST.json'),
                     'cli_runtime_evidence': json.loads((self.state / 'cli' / ('runtime-evidence-' + arch + '.json')).read_text()),
                     'router_runtime_tested': False, 'native_bypass_enabled_by_build': False,
-                     'homeproxy_default_backend': 'private', 'existing_upgrade_uci_preserved': True,
+                     'core_package': 'sing-box', 'core_command': '/usr/bin/sing-box',
+                     'core_private_version': source['private_version'], 'paired_products': paired_products,
+                     'homeproxy_backend_selection_required': False, 'homeproxy_factory_config_preserved': True,
+                     'existing_upgrade_uci_preserved': True,
                     'shared_cache_used': False, 'public_artifact_upload': False}
         write_json(publish / 'BUILD-RECEIPT.json', metadata)
         shutil.copyfile(self.root / '.config', publish / 'effective.config')

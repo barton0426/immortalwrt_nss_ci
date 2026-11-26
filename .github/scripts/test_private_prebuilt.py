@@ -1060,7 +1060,7 @@ class ReaderTests(unittest.TestCase):
         driver = ('TOPDIR:=' + str(self.buildroot) + '\nINCLUDE_DIR:=' + str(include) + '\n' +
                   'include ' + str(HERE / 'prebuilt-box.Makefile') + '\n' +
                   '.PHONY: prepare compile install\nprepare:\n\t$(Build/Prepare)\n' +
-                  'compile:\n\t$(Build/Compile)\ninstall:\n\t$(call Package/box-private/install,' + str(harness / 'dest') + ')\n')
+                  'compile:\n\t$(Build/Compile)\ninstall:\n\t$(call Package/sing-box/install,' + str(harness / 'dest') + ')\n')
         # Actual buildroot stays a synthetic target/config fixture; only rules.mk is glue.
         (self.buildroot / 'rules.mk').write_bytes((harness / 'rules.mk').read_bytes())
         (harness / 'driver.mk').write_text(driver)
@@ -1071,13 +1071,14 @@ class ReaderTests(unittest.TestCase):
                                 env=environment, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         dest = harness / 'dest'
-        self.assertEqual((dest / 'usr/bin/box-private').read_bytes(), self.binary)
-        self.assertEqual(stat.S_IMODE((dest / 'usr/bin/box-private').stat().st_mode), 0o755)
+        self.assertEqual((dest / 'usr/bin/sing-box').read_bytes(), self.binary)
+        self.assertEqual(stat.S_IMODE((dest / 'usr/bin/sing-box').stat().st_mode), 0o755)
         self.assertTrue((dest / 'usr/share/box-private/licenses/unlisted-THIRD-PARTY-NOTICE').is_file())
         self.assertTrue((dest / 'usr/share/box-private/SOURCE.json').is_file())
         self.assertTrue((dest / 'usr/share/box-private/PREBUILT-MANIFEST.json').is_file())
         self.assertFalse((dest / 'etc').exists())
-        self.assertEqual(sorted(path.name for path in (dest / 'usr/bin').iterdir()), ['box-private'])
+        self.assertEqual(sorted(path.name for path in (dest / 'usr/bin').iterdir()), ['sing-box'])
+        self.assertFalse((dest / 'usr/bin/box-private').exists())
         failed = subprocess.run(args + ['PRIVATE_PREBUILT_DIR=', 'compile'], cwd=harness,
                                 env=environment, text=True, capture_output=True, timeout=30)
         self.assertNotEqual(failed.returncode, 0)
@@ -1092,7 +1093,15 @@ class ReaderTests(unittest.TestCase):
         self.assertIn('check-prepared --buildroot', text)
         self.assertIn('DEPENDS:=+ca-bundle +kmod-inet-diag +kmod-netlink-diag +kmod-tun', text)
         self.assertIn('RSTRIP:=:', text)
-        self.assertIn('usr/bin/box-private', text)
+        self.assertIn('PKG_NAME:=sing-box', text)
+        self.assertIn('PKG_VERSION:=1.15.0_alpha13', text)
+        self.assertIn('PKG_RELEASE:=3', text)
+        self.assertEqual(pb.VERSION, '1.15.0-alpha.13-private.3')
+        self.assertIn('$(eval $(call BuildPackage,sing-box))', text)
+        self.assertIn('"$(PRIVATE_PREBUILT_DIR)/box-private" $(1)/usr/bin/sing-box', text)
+        self.assertNotIn('Package/box-private', text)
+        self.assertNotIn('usr/bin/box-private', text)
+        self.assertNotIn('PKG_CPE_ID', text)
         self.assertIn('SOURCE.json', text)
         self.assertIn('runtime-evidence-*.json', text)
         self.assertIn('build-info-*.txt', text)

@@ -18,7 +18,7 @@ name: Personal firmware (private downloads, manual only)
         description: 'Reviewed private main commit (full 40 characters)'
         required: true
         type: string
-        default: 2954db077bd9f8d43394d5d7e712a31a54dcaf14
+        default: 03f51d5d3ddb9267f1cfbd66c78c7ba5b61c4779
       firmware_commit:
         description: 'Pinned public firmware source commit (not a moving branch)'
         required: true
