@@ -33,6 +33,7 @@ define Package/sing-box
   CATEGORY:=Network
   SUBMENU:=Web Servers/Proxies
   TITLE:=Unofficial extended sing-box core (no standalone service)
+  USERID:=sing-box=5566:sing-box=5566
   DEPENDS:=+ca-bundle +kmod-inet-diag +kmod-netlink-diag +kmod-tun +kmod-nft-queue +kmod-nf-conntrack-netlink
 endef
 

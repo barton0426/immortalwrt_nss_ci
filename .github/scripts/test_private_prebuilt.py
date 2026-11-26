@@ -1094,6 +1094,8 @@ class ReaderTests(unittest.TestCase):
         self.assertIn('DEPENDS:=+ca-bundle +kmod-inet-diag +kmod-netlink-diag +kmod-tun', text)
         self.assertIn('RSTRIP:=:', text)
         self.assertIn('PKG_NAME:=sing-box', text)
+        self.assertIn('  USERID:=sing-box=5566:sing-box=5566\n',
+                      text.split('define Package/sing-box\n', 1)[1].split('endef', 1)[0])
         self.assertIn('PKG_VERSION:=1.15.0_alpha13', text)
         self.assertIn('PKG_RELEASE:=3', text)
         self.assertEqual(pb.VERSION, '1.15.0-alpha.13-private.3')
